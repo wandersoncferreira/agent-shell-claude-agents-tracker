@@ -805,6 +805,56 @@ Returns the agent plist or nil if not found."
     (put-text-property section-start (point) 'claude-teammate-name member-name)
     (put-text-property section-start (point) 'claude-team-name team-name)))
 
+(defun agent-shell-claude-agents-tracker--compute-summary ()
+  "Compute summary statistics for the header line.
+Returns a plist with :total, :running, :completed, :failed, :unread."
+  (let ((total 0)
+        (running 0)
+        (completed 0)
+        (failed 0)
+        (unread 0))
+    ;; Count agents by status
+    (maphash (lambda (_id agent)
+               (cl-incf total)
+               (pcase (plist-get agent :status)
+                 ("running" (cl-incf running))
+                 ("completed" (cl-incf completed))
+                 ("failed" (cl-incf failed))))
+             agent-shell-claude-agents-tracker--agents)
+    ;; Count unread messages across all agents
+    (maphash (lambda (agent-name _messages)
+               (cl-incf unread (agent-shell-claude-agents-tracker--agent-unread-count agent-name)))
+             agent-shell-claude-agents-tracker--agent-messages)
+    (list :total total :running running :completed completed :failed failed :unread unread)))
+
+(defun agent-shell-claude-agents-tracker--format-summary (stats)
+  "Format STATS plist into a summary string.
+Omits zero-count segments."
+  (let* ((total (plist-get stats :total))
+         (running (plist-get stats :running))
+         (completed (plist-get stats :completed))
+         (failed (plist-get stats :failed))
+         (unread (plist-get stats :unread))
+         (status-parts nil)
+         (agent-word (if (= total 1) "agent" "agents")))
+    (when (> total 0)
+      ;; Build status breakdown
+      (when (> failed 0)
+        (push (format "%d failed" failed) status-parts))
+      (when (> completed 0)
+        (push (format "%d completed" completed) status-parts))
+      (when (> running 0)
+        (push (format "%d running" running) status-parts))
+      ;; Format the main part
+      (let ((main-part (if status-parts
+                           (format "%d %s: %s" total agent-word
+                                   (string-join (nreverse status-parts) ", "))
+                         (format "%d %s" total agent-word))))
+        ;; Add unread count if > 0
+        (if (> unread 0)
+            (format "%s | %d unread" main-part unread)
+          main-part)))))
+
 (defun agent-shell-claude-agents-tracker--refresh-display ()
   "Refresh the tracker buffer display."
   (when-let ((buf (get-buffer agent-shell-claude-agents-tracker--buffer-name)))
@@ -814,7 +864,14 @@ Returns the agent plist or nil if not found."
         (erase-buffer)
         (insert (propertize "Code Agents\n" 'face 'agent-shell-claude-agents-tracker-header))
         (insert (propertize (make-string 50 ?─) 'face 'agent-shell-claude-agents-tracker-meta))
-        (insert "\n\n")
+        (insert "\n")
+        ;; Summary line
+        (let* ((stats (agent-shell-claude-agents-tracker--compute-summary))
+               (summary (agent-shell-claude-agents-tracker--format-summary stats)))
+          (when summary
+            (insert (propertize summary 'face 'agent-shell-claude-agents-tracker-meta))
+            (insert "\n")))
+        (insert "\n")
         ;; Collect team member names to exclude from standalone agents
         (let ((team-member-names (make-hash-table :test 'equal))
               (has-content nil))
