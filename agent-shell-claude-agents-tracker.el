@@ -72,17 +72,17 @@
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-running
-  '((t :foreground "#98c379" :weight bold))
+  '((t :inherit success :weight bold))
   "Face for running subagents."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-completed
-  '((t :foreground "#5c6370" :slant italic))
+  '((t :inherit shadow :slant italic))
   "Face for completed subagents."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-failed
-  '((t :foreground "#e06c75" :weight bold))
+  '((t :inherit error :weight bold))
   "Face for failed subagents."
   :group 'agent-shell-claude-agents-tracker)
 
@@ -92,22 +92,22 @@
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-parent
-  '((t :foreground "#61afef" :weight bold))
+  '((t :inherit font-lock-function-name-face :weight bold))
   "Face for parent buffer names."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-type
-  '((t :foreground "#c678dd"))
+  '((t :inherit font-lock-type-face))
   "Face for subagent type."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-meta
-  '((t :foreground "#5c6370"))
+  '((t :inherit shadow))
   "Face for metadata (duration, timing)."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-waiting
-  '((t :foreground "#e06c75" :weight bold))
+  '((t :inherit warning :weight bold))
   "Face for waiting for response indicator."
   :group 'agent-shell-claude-agents-tracker)
 
@@ -436,22 +436,22 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-section-label
-  '((t :foreground "#e5c07b" :weight bold))
+  '((t :inherit font-lock-keyword-face :weight bold))
   "Face for section labels (Prompt, Output)."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-expand-button
-  '((t :foreground "#56b6c2" :weight bold))
+  '((t :inherit link :weight bold))
   "Face for expand/collapse buttons."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-teammate
-  '((t :foreground "#98c379" :weight bold))
+  '((t :inherit success :weight bold))
   "Face for teammate names."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-teammate-id
-  '((t :foreground "#5c6370" :slant italic))
+  '((t :inherit shadow :slant italic))
   "Face for teammate IDs."
   :group 'agent-shell-claude-agents-tracker)
 
@@ -467,7 +467,7 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
                 (format "\n... (%d more lines)" (- total max-lines)))))))
 
 (defface agent-shell-claude-agents-tracker-unread
-  '((t :foreground "#e06c75" :weight bold))
+  '((t :inherit warning :weight bold))
   "Face for unread message indicator."
   :group 'agent-shell-claude-agents-tracker)
 
@@ -843,12 +843,12 @@ Returns the agent plist or nil if not found."
 ;;; Inbox Polling
 
 (defface agent-shell-claude-agents-tracker-inbox-sender
-  '((t :foreground "#61afef" :weight bold))
+  '((t :inherit font-lock-function-name-face :weight bold))
   "Face for message sender in inbox."
   :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-inbox-timestamp
-  '((t :foreground "#5c6370" :slant italic))
+  '((t :inherit shadow :slant italic))
   "Face for message timestamp in inbox."
   :group 'agent-shell-claude-agents-tracker)
 
