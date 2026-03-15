@@ -1263,78 +1263,89 @@ Uses `file-truename' to resolve symlinks before checking."
     (and (string-prefix-p claude-dir expanded-path)
          (not (string-match-p "\\.\\." expanded-path)))))
 
-(defun agent-shell-claude-agents-tracker-reset-all ()
-  "Reset everything: clear all state and delete team/task directories.
+(defun agent-shell-claude-agents-tracker-reset-all (&optional all-teams)
+  "Reset team state and delete team/task directories.
+
+With prefix argument (C-u), delete ALL teams without prompting which one.
+Without prefix argument, prompt for which team to reset.
+
 This will:
-1. Clear all internal hash tables (agents, teams, messages)
-2. Properly unsubscribe from all agent-shell buffers
-3. Stop any running timers
-4. Delete all team directories from ~/.claude/teams/
-5. Delete all task directories from ~/.claude/tasks/
-6. Refresh the display
+1. Delete team directory from ~/.claude/teams/<team>
+2. Delete task directory from ~/.claude/tasks/<team>
+3. Clear internal state for the affected team(s)
+4. Refresh the display
 
 WARNING: This is destructive and cannot be undone!"
-  (interactive)
+  (interactive "P")
   (let* ((teams-dir (agent-shell-claude-agents-tracker--teams-dir))
          (tasks-dir (agent-shell-claude-agents-tracker--tasks-dir))
-         ;; Count items before confirmation so user sees what will be deleted
-         (team-count (if (file-directory-p teams-dir)
-                         (length (directory-files teams-dir nil "^[^.]"))
-                       0))
-         (task-count (if (file-directory-p tasks-dir)
-                         (length (directory-files tasks-dir nil "^[^.]"))
-                       0))
-         (agent-count (hash-table-count agent-shell-claude-agents-tracker--agents))
+         (available-teams (when (file-directory-p teams-dir)
+                            (directory-files teams-dir nil "^[^.]")))
+         (teams-to-delete nil)
          (deleted-teams 0)
          (deleted-tasks 0))
-    (when (yes-or-no-p
-           (format "DANGER: Delete %d team(s), %d task folder(s), %d tracked agent(s)? "
-                   team-count task-count agent-count))
-      ;; 1. Validate paths are under ~/.claude/ before proceeding
+    ;; Determine which teams to delete
+    (cond
+     ;; No teams available
+     ((null available-teams)
+      (user-error "No teams found in %s" teams-dir))
+     ;; C-u: delete all teams
+     (all-teams
+      (when (yes-or-no-p
+             (format "DANGER: Delete ALL %d team(s)? " (length available-teams)))
+        (setq teams-to-delete available-teams)))
+     ;; No prefix: prompt for specific team
+     (t
+      (let ((team (completing-read "Team to reset: " available-teams nil t)))
+        (when (and team (not (string-empty-p team)))
+          (when (yes-or-no-p (format "Delete team '%s'? " team))
+            (setq teams-to-delete (list team)))))))
+    ;; Process deletion
+    (when teams-to-delete
+      ;; Validate base paths are under ~/.claude/
       (unless (and (agent-shell-claude-agents-tracker--safe-claude-subdir-p teams-dir)
                    (agent-shell-claude-agents-tracker--safe-claude-subdir-p tasks-dir))
         (user-error "Safety check failed: paths not under ~/.claude/"))
-      ;; 2. Clear all internal hash tables
-      (clrhash agent-shell-claude-agents-tracker--agents)
-      (clrhash agent-shell-claude-agents-tracker--expanded-agents)
-      (clrhash agent-shell-claude-agents-tracker--teams)
-      (clrhash agent-shell-claude-agents-tracker--seen-messages)
-      (clrhash agent-shell-claude-agents-tracker--agent-messages)
-      (clrhash agent-shell-claude-agents-tracker--expanded-messages)
-      (clrhash agent-shell-claude-agents-tracker--collapsed-messages)
-      (clrhash agent-shell-claude-agents-tracker--waiting-for-response)
-      ;; 3. Properly unsubscribe from all buffers
-      ;; We iterate over a copy-free list since unsubscribe modifies --subscriptions
-      ;; by removing entries, but dolist captures the list head before iteration
-      (dolist (entry agent-shell-claude-agents-tracker--subscriptions)
-        (agent-shell-claude-agents-tracker--unsubscribe-from-buffer (car entry)))
-      (setq agent-shell-claude-agents-tracker--subscriptions nil)
-      ;; 4. Stop timers and watchers
-      (agent-shell-claude-agents-tracker--stop-refresh-timer)
-      (agent-shell-claude-agents-tracker--stop-inbox-watchers)
-      ;; 5. Delete team directories (with path validation for each)
-      (when (file-directory-p teams-dir)
-        (dolist (dir (directory-files teams-dir t "^[^.]"))
-          (when (and (file-directory-p dir)
-                     (agent-shell-claude-agents-tracker--safe-claude-subdir-p dir))
+      ;; Delete each team
+      (dolist (team teams-to-delete)
+        (let ((team-dir (expand-file-name team teams-dir))
+              (task-dir (expand-file-name team tasks-dir)))
+          ;; Delete team directory
+          (when (and (file-directory-p team-dir)
+                     (agent-shell-claude-agents-tracker--safe-claude-subdir-p team-dir))
             (condition-case err
                 (progn
-                  (delete-directory dir t)
+                  (delete-directory team-dir t)
                   (setq deleted-teams (1+ deleted-teams)))
               (error
-               (message "Failed to delete team dir %s: %s" dir err))))))
-      ;; 6. Delete task directories (with path validation for each)
-      (when (file-directory-p tasks-dir)
-        (dolist (dir (directory-files tasks-dir t "^[^.]"))
-          (when (and (file-directory-p dir)
-                     (agent-shell-claude-agents-tracker--safe-claude-subdir-p dir))
+               (message "Failed to delete team dir %s: %s" team-dir err))))
+          ;; Delete corresponding task directory
+          (when (and (file-directory-p task-dir)
+                     (agent-shell-claude-agents-tracker--safe-claude-subdir-p task-dir))
             (condition-case err
                 (progn
-                  (delete-directory dir t)
+                  (delete-directory task-dir t)
                   (setq deleted-tasks (1+ deleted-tasks)))
               (error
-               (message "Failed to delete task dir %s: %s" dir err))))))
-      ;; 7. Refresh display
+               (message "Failed to delete task dir %s: %s" task-dir err))))))
+      ;; Clear internal state if all teams were deleted
+      (when all-teams
+        (clrhash agent-shell-claude-agents-tracker--agents)
+        (clrhash agent-shell-claude-agents-tracker--expanded-agents)
+        (clrhash agent-shell-claude-agents-tracker--teams)
+        (clrhash agent-shell-claude-agents-tracker--seen-messages)
+        (clrhash agent-shell-claude-agents-tracker--agent-messages)
+        (clrhash agent-shell-claude-agents-tracker--expanded-messages)
+        (clrhash agent-shell-claude-agents-tracker--collapsed-messages)
+        (clrhash agent-shell-claude-agents-tracker--waiting-for-response)
+        ;; Unsubscribe from all buffers
+        (dolist (entry agent-shell-claude-agents-tracker--subscriptions)
+          (agent-shell-claude-agents-tracker--unsubscribe-from-buffer (car entry)))
+        (setq agent-shell-claude-agents-tracker--subscriptions nil)
+        ;; Stop timers and watchers
+        (agent-shell-claude-agents-tracker--stop-refresh-timer)
+        (agent-shell-claude-agents-tracker--stop-inbox-watchers))
+      ;; Refresh display
       (agent-shell-claude-agents-tracker--refresh-display)
       (message "Reset complete: deleted %d team(s) and %d task folder(s)"
                deleted-teams deleted-tasks))))

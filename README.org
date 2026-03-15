@@ -54,13 +54,14 @@ add to your config.el file
 
 * Usage
 
-| Command                                   | Description                      |
-|-------------------------------------------+----------------------------------|
-| =M-x agent-shell-claude-agents-tracker-show=        | Open the tracker buffer          |
-| =M-x agent-shell-claude-agents-tracker-hide=        | Hide the tracker buffer          |
-| =M-x agent-shell-claude-agents-tracker-toggle=      | Toggle buffer visibility         |
-| =M-x agent-shell-claude-agents-tracker-clear=       | Clear all tracked subagents      |
-| =M-x agent-shell-claude-agents-tracker-send-message= | Send message to a teammate       |
+| Command                                              | Description                                |
+|------------------------------------------------------+--------------------------------------------|
+| =M-x agent-shell-claude-agents-tracker-show=         | Open the tracker buffer                    |
+| =M-x agent-shell-claude-agents-tracker-hide=         | Hide the tracker buffer                    |
+| =M-x agent-shell-claude-agents-tracker-toggle=       | Toggle buffer visibility                   |
+| =M-x agent-shell-claude-agents-tracker-clear=        | Clear all tracked subagents                |
+| =M-x agent-shell-claude-agents-tracker-reset-all=    | Delete a specific team (=C-u= for all)     |
+| =M-x agent-shell-claude-agents-tracker-send-message= | Send message to a teammate                 |
 
 ** Buffer Keybindings
 
@@ -69,6 +70,7 @@ add to your config.el file
 | =g=     | Refresh                          |
 | =q=     | Hide                             |
 | =c=     | Clear all                        |
+| =R=     | Reset team (=C-u R= for all)     |
 | =m=     | Send message to teammate         |
 | =TAB=   | Toggle details at point          |
 | =RET=   | Toggle details at point          |
