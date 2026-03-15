@@ -16,6 +16,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Summary line below header showing agent counts and unread messages (closes #4)
+  - Example: `3 agents: 2 running, 1 completed | 2 unread`
+  - Omits zero-count segments for cleaner display
 - Compact one-line agent headers for better scannability (closes #5)
   - Collapsed: `▶ ● Explore  Search for auth...  2m [3]`
   - Expanded: Full details with description, timing, messages, prompt, output
