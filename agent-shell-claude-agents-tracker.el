@@ -178,12 +178,6 @@ Keys are \"agent-name:message-index\", values are t if collapsed.")
   "Hash table tracking agents we're waiting for a response from.
 Keys are agent names, values are the timestamp when we started waiting.")
 
-(defvar agent-shell-claude-agents-tracker--spinner-frames '("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  "Frames for the spinner animation.")
-
-(defvar agent-shell-claude-agents-tracker--spinner-index 0
-  "Current index in the spinner frames.")
-
 ;;; Event Handling
 
 (defun agent-shell-claude-agents-tracker--get-raw-input-field (raw-input field)
@@ -559,11 +553,7 @@ Uses compact one-line format when collapsed, full details when expanded."
                                 'face 'agent-shell-claude-agents-tracker-unread)))
           (when is-waiting
             (insert " ")
-            (insert (propertize (format "%s"
-                                        (nth (mod agent-shell-claude-agents-tracker--spinner-index
-                                                  (length agent-shell-claude-agents-tracker--spinner-frames))
-                                             agent-shell-claude-agents-tracker--spinner-frames))
-                                'face 'agent-shell-claude-agents-tracker-waiting)))
+            (insert (propertize "⏳" 'face 'agent-shell-claude-agents-tracker-waiting)))
           (insert "\n")
           ;; Full description
           (when description
@@ -758,11 +748,7 @@ Uses compact one-line format when collapsed, full details when expanded."
                             'face 'agent-shell-claude-agents-tracker-unread)))
       (when is-waiting
         (insert " ")
-        (insert (propertize (format "%s"
-                                    (nth (mod agent-shell-claude-agents-tracker--spinner-index
-                                              (length agent-shell-claude-agents-tracker--spinner-frames))
-                                         agent-shell-claude-agents-tracker--spinner-frames))
-                            'face 'agent-shell-claude-agents-tracker-waiting)))
+        (insert (propertize "⏳" 'face 'agent-shell-claude-agents-tracker-waiting)))
       (insert "\n"))
     ;; Spacing between agents
     (insert "\n")
@@ -1021,32 +1007,6 @@ Returns list of (team-name . inbox-file-path) pairs."
     (cancel-timer agent-shell-claude-agents-tracker--inbox-timer)
     (setq agent-shell-claude-agents-tracker--inbox-timer nil)))
 
-(defvar agent-shell-claude-agents-tracker--spinner-timer nil
-  "Timer for spinner animation.")
-
-(defun agent-shell-claude-agents-tracker--start-spinner-timer ()
-  "Start the spinner animation timer."
-  (unless agent-shell-claude-agents-tracker--spinner-timer
-    (setq agent-shell-claude-agents-tracker--spinner-timer
-          (run-with-timer 0.1 0.1 #'agent-shell-claude-agents-tracker--update-spinner))))
-
-(defun agent-shell-claude-agents-tracker--stop-spinner-timer ()
-  "Stop the spinner animation timer."
-  (when agent-shell-claude-agents-tracker--spinner-timer
-    (cancel-timer agent-shell-claude-agents-tracker--spinner-timer)
-    (setq agent-shell-claude-agents-tracker--spinner-timer nil)))
-
-(defun agent-shell-claude-agents-tracker--update-spinner ()
-  "Update the spinner frame and refresh display if waiting."
-  (if (zerop (hash-table-count agent-shell-claude-agents-tracker--waiting-for-response))
-      ;; No one waiting, stop the timer
-      (agent-shell-claude-agents-tracker--stop-spinner-timer)
-    ;; Update spinner and refresh
-    (setq agent-shell-claude-agents-tracker--spinner-index
-          (mod (1+ agent-shell-claude-agents-tracker--spinner-index)
-               (length agent-shell-claude-agents-tracker--spinner-frames)))
-    (agent-shell-claude-agents-tracker--refresh-display)))
-
 (defun agent-shell-claude-agents-tracker-clear-inbox ()
   "Clear all messages and reset message tracking."
   (interactive)
@@ -1279,7 +1239,6 @@ WARNING: This is destructive and cannot be undone!"
         (agent-shell-claude-agents-tracker--unsubscribe-from-buffer (car entry)))
       (setq agent-shell-claude-agents-tracker--subscriptions nil)
       ;; 4. Stop all timers
-      (agent-shell-claude-agents-tracker--stop-spinner-timer)
       (agent-shell-claude-agents-tracker--stop-refresh-timer)
       (agent-shell-claude-agents-tracker--stop-inbox-timer)
       ;; 5. Delete team directories (with path validation for each)
@@ -1391,8 +1350,6 @@ Sends the message request directly to the parent agent-shell session."
                                  teammate-name msg-text)))
               ;; Set waiting state
               (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
-              ;; Start spinner timer if not already running
-              (agent-shell-claude-agents-tracker--start-spinner-timer)
               ;; Call from within the buffer context so it can access session state
               (with-current-buffer shell-buf
                 (agent-shell--send-command :prompt input :shell-buffer shell-buf))
@@ -1439,8 +1396,6 @@ Prompts for team name, then teammate, then message content."
                                        teammate-name msg-text)))
                     ;; Set waiting state
                     (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
-                    ;; Start spinner timer if not already running
-                    (agent-shell-claude-agents-tracker--start-spinner-timer)
                     ;; Call from within the buffer context so it can access session state
                     (with-current-buffer shell-buf
                       (agent-shell--send-command :prompt input :shell-buffer shell-buf))
