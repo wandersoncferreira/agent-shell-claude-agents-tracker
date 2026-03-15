@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Compact one-line agent headers for better scannability (closes #5)
+  - Collapsed: `▶ ● Explore  Search for auth...  2m [3]`
+  - Expanded: Full details with description, timing, messages, prompt, output
+  - Status indicators: `●` running, `✓` completed, `✗` failed
+  - Unread count `[N]` visible on header line
+
 ### Fixed
 
 - `reset-all` now shows counts of teams/tasks/agents in the confirmation prompt
