@@ -36,7 +36,7 @@ Two agents working together: a "designer" agent received work from another teamm
 
 In doom emacs:
 
-# add to your packages.el file
+add to your packages.el file
 #+begin_src emacs-lisp
 (package! agent-shell-claude-agents-tracker
   :recipe (:host github
@@ -44,7 +44,7 @@ In doom emacs:
                  :branch "main"))
 #+end_src
 
-# add to your config.el file
+add to your config.el file
 #+begin_src emacs-lisp
 (use-package! agent-shell-claude-agents-tracker
   :after agent-shell
