@@ -319,7 +319,7 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
   "Unsubscribe from events in BUFFER."
   (when-let ((entry (assq buffer agent-shell-claude-agents-tracker--subscriptions)))
     (when (functionp 'agent-shell-unsubscribe)
-      (agent-shell-unsubscribe :token (cdr entry)))
+      (agent-shell-unsubscribe :subscription (cdr entry)))
     (setq agent-shell-claude-agents-tracker--subscriptions
           (assq-delete-all buffer agent-shell-claude-agents-tracker--subscriptions))))
 
@@ -522,7 +522,10 @@ TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
                             'face 'agent-shell-claude-agents-tracker-meta)))
       (insert "\n"))
     ;; Send message button (if team member)
-    (when (and team-name member-name)
+    (when (and team-name
+               member-name
+               (not (string-empty-p (or team-name "")))
+               (not (string-empty-p (or member-name ""))))
       (insert prefix)
       (insert-text-button "✉ Send message"
                           'face 'agent-shell-claude-agents-tracker-expand-button
@@ -646,17 +649,56 @@ TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
               (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
               (insert "\n")))
           (insert "\n"))
-        ;; Show output if available
+        ;; Show output if available (with collapsible format like messages)
         (when output
           (insert prefix)
           (insert (propertize "Output" 'face 'agent-shell-claude-agents-tracker-section-label))
           (insert "\n")
-          (let ((truncated (agent-shell-claude-agents-tracker--truncate-output
-                            output agent-shell-claude-agents-tracker-output-max-lines)))
-            (dolist (line (split-string truncated "\n"))
-              (insert prefix "  ")
-              (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
-              (insert "\n")))))
+          (let* ((output-key (format "%s:output" (or expand-key "unknown")))
+                 (output-collapsed (gethash output-key agent-shell-claude-agents-tracker--collapsed-messages))
+                 (truncated (agent-shell-claude-agents-tracker--truncate-output
+                             output agent-shell-claude-agents-tracker-output-max-lines))
+                 (is-truncated (agent-shell-claude-agents-tracker--text-truncated-p
+                                output agent-shell-claude-agents-tracker-output-max-lines))
+                 (output-start-pos (point)))
+            (insert prefix "  ")
+            ;; Collapse/expand button
+            (insert-text-button (if output-collapsed "▶" "▼")
+                                'face 'agent-shell-claude-agents-tracker-expand-button
+                                'action (lambda (button)
+                                          (agent-shell-claude-agents-tracker-toggle-message
+                                           (button-get button 'message-key)))
+                                'message-key output-key
+                                'help-echo "Click to toggle output")
+            (insert " ")
+            (insert (propertize (or description type "Agent result")
+                                'face 'agent-shell-claude-agents-tracker-meta))
+            (insert "\n")
+            ;; Only show content if not collapsed
+            (unless output-collapsed
+              (dolist (line (split-string truncated "\n"))
+                (insert prefix "    ")
+                (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
+                (insert "\n"))
+              ;; Add "View full" button if truncated
+              (when is-truncated
+                (insert prefix "    ")
+                (insert-text-button "📄 View full"
+                                    'face 'agent-shell-claude-agents-tracker-expand-button
+                                    'action (lambda (button)
+                                              (agent-shell-claude-agents-tracker-view-full-message
+                                               (button-get button 'agent-name)
+                                               (button-get button 'full-text)
+                                               (button-get button 'summary)
+                                               (button-get button 'timestamp)))
+                                    'agent-name agent-name
+                                    'full-text output
+                                    'summary (or description type "Agent output")
+                                    'timestamp (when completed-at (format-time-string "%H:%M:%S" completed-at))
+                                    'help-echo "View full output in separate buffer")
+                (insert "\n")))
+            ;; Add message-key property to entire output area (for > and < bindings)
+            (put-text-property output-start-pos (point) 'message-key output-key))))
     ;; Spacing between agents
     (insert "\n")
     ;; Store position for navigation
@@ -722,10 +764,34 @@ Returns the agent plist or nil if not found."
         (insert (propertize "Code Agents\n" 'face 'agent-shell-claude-agents-tracker-header))
         (insert (propertize (make-string 50 ?─) 'face 'agent-shell-claude-agents-tracker-meta))
         (insert "\n\n")
-        ;; Collect team member names to exclude from ungrouped agents
+        ;; Collect team member names to exclude from standalone agents
         (let ((team-member-names (make-hash-table :test 'equal))
               (has-content nil))
-          ;; First, display teams and their members
+          ;; First, collect team member names (to exclude from standalone section)
+          (maphash (lambda (_name team)
+                     (let ((members (plist-get team :members)))
+                       (dolist (member members)
+                         (let ((member-name (cdr (assq 'name member))))
+                           (when member-name
+                             (puthash member-name t team-member-names))))))
+                   agent-shell-claude-agents-tracker--teams)
+          ;; Display standalone agents FIRST
+          (let ((ungrouped nil))
+            (maphash (lambda (_id agent)
+                       (let ((name (plist-get agent :name)))
+                         (unless (gethash name team-member-names)
+                           (push agent ungrouped))))
+                     agent-shell-claude-agents-tracker--agents)
+            (when ungrouped
+              (setq has-content t)
+              (insert (propertize "Standalone Agents"
+                                  'face 'agent-shell-claude-agents-tracker-parent))
+              (insert "\n")
+              (let ((len (length ungrouped)))
+                (dotimes (i len)
+                  (agent-shell-claude-agents-tracker--insert-subagent
+                   (nth i ungrouped) (= i (1- len)))))))
+          ;; Then, display teams and their members (below standalone)
           (maphash (lambda (_name team)
                      (let* ((team-name (plist-get team :name))
                             (members (plist-get team :members))
@@ -735,6 +801,8 @@ Returns the agent plist or nil if not found."
                                                  (not (equal (cdr (assq 'name m)) "team-lead")))
                                                members)))
                        (when non-lead-members
+                         (when has-content
+                           (insert "\n"))
                          (setq has-content t)
                          ;; Team header
                          (insert (propertize (format "Team: %s" team-name)
@@ -742,28 +810,8 @@ Returns the agent plist or nil if not found."
                          (insert "\n")
                          ;; Insert each member
                          (dolist (member non-lead-members)
-                           (let ((member-name (cdr (assq 'name member))))
-                             (puthash member-name t team-member-names)
-                             (agent-shell-claude-agents-tracker--insert-team-member member team-name))))))
+                           (agent-shell-claude-agents-tracker--insert-team-member member team-name)))))
                    agent-shell-claude-agents-tracker--teams)
-          ;; Then, display ungrouped agents (not in any team)
-          (let ((ungrouped nil))
-            (maphash (lambda (_id agent)
-                       (let ((name (plist-get agent :name)))
-                         (unless (gethash name team-member-names)
-                           (push agent ungrouped))))
-                     agent-shell-claude-agents-tracker--agents)
-            (when ungrouped
-              (setq has-content t)
-              (when (> (hash-table-count agent-shell-claude-agents-tracker--teams) 0)
-                (insert "\n"))
-              (insert (propertize "Standalone Agents"
-                                  'face 'agent-shell-claude-agents-tracker-parent))
-              (insert "\n")
-              (let ((len (length ungrouped)))
-                (dotimes (i len)
-                  (agent-shell-claude-agents-tracker--insert-subagent
-                   (nth i ungrouped) (= i (1- len)))))))
           ;; Show placeholder if nothing to display
           (unless has-content
             (insert (propertize "No agents tracked yet.\n\n"

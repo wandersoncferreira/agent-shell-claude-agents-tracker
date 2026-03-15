@@ -8,6 +8,20 @@ Track and display subagents spawned by Claude Code within agent-shell sessions.
 When Claude Code uses the =Agent= tool to spawn subagents (Explore, Plan, general-purpose, etc.),
 this package detects and displays them in a dedicated buffer.
 
+* Screenshots
+
+** Standalone Agent
+
+A single Plan agent spawned to research and propose implementation steps:
+
+[[file:imgs/standalone_example.png]]
+
+** Team Collaboration
+
+Two agents working together: a "designer" agent received work from another teammate without explicit user intervention, demonstrating autonomous team coordination:
+
+[[file:imgs/team_example.png]]
+
 * Features
 
 - Detects Agent tool invocations via =tool-call-update= events
@@ -20,8 +34,19 @@ this package detects and displays them in a dedicated buffer.
 
 * Installation
 
+In doom emacs:
+
+# add to your packages.el file
 #+begin_src emacs-lisp
-(use-package agent-shell-claude-agents-tracker
+(package! agent-shell-claude-agents-tracker
+  :recipe (:host github
+                 :repo "wandersoncferreira/agent-shell-claude-agents-tracker"
+                 :branch "main"))
+#+end_src
+
+# add to your config.el file
+#+begin_src emacs-lisp
+(use-package! agent-shell-claude-agents-tracker
   :after agent-shell
   :config
   (agent-shell-claude-agents-tracker-mode 1))
