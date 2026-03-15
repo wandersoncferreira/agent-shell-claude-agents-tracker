@@ -417,6 +417,36 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
          (t (format "%dh %dm" (/ (round seconds) 3600) (mod (/ (round seconds) 60) 60)))))
     ""))
 
+(defun agent-shell-claude-agents-tracker--format-duration-compact (start end)
+  "Format duration between START and END times in compact form (e.g., 2m, 45s)."
+  (if (and start end)
+      (let ((seconds (float-time (time-subtract end start))))
+        (cond
+         ((< seconds 60) (format "%ds" (round seconds)))
+         ((< seconds 3600) (format "%dm" (round (/ seconds 60))))
+         (t (format "%dh" (round (/ seconds 3600))))))
+    ""))
+
+(defun agent-shell-claude-agents-tracker--format-elapsed-compact (start)
+  "Format elapsed time since START in compact form."
+  (if start
+      (agent-shell-claude-agents-tracker--format-duration-compact start (current-time))
+    ""))
+
+(defun agent-shell-claude-agents-tracker--status-indicator (status)
+  "Return a single-character status indicator for STATUS."
+  (pcase status
+    ("running" "●")
+    ("completed" "✓")
+    ("failed" "✗")
+    (_ "○")))
+
+(defun agent-shell-claude-agents-tracker--truncate-description (desc max-len)
+  "Truncate DESC to MAX-LEN characters, adding ellipsis if needed."
+  (if (and desc (> (length desc) max-len))
+      (concat (substring desc 0 (- max-len 3)) "...")
+    (or desc "")))
+
 (defun agent-shell-claude-agents-tracker--status-face (status)
   "Return face for STATUS."
   (pcase status
@@ -473,7 +503,8 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
 
 (defun agent-shell-claude-agents-tracker--insert-subagent (agent is-last &optional team-name member-name)
   "Insert AGENT info into buffer. IS-LAST indicates if it's the last in group.
-TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
+TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging.
+Uses compact one-line format when collapsed, full details when expanded."
   (let* ((tool-call-id (plist-get agent :tool-call-id))
          (agent-name (or member-name (plist-get agent :name)))
          (status (plist-get agent :status))
@@ -498,209 +529,241 @@ TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
                           (gethash agent-name agent-shell-claude-agents-tracker--waiting-for-response)))
          (has-more (or prompt output messages is-waiting))
          (prefix "  ")
-         (start-pos (point)))
-    ;; Main line with status and type
-    (insert prefix)
-    (when status
-      (insert (propertize (format "[%s]" status)
-                          'face (agent-shell-claude-agents-tracker--status-face status)))
-      (insert " "))
-    (insert (propertize (or type "Agent") 'face 'agent-shell-claude-agents-tracker-type))
-    (insert "\n")
-    ;; Description
-    (when description
-      (insert prefix)
-      (insert description)
-      (insert "\n"))
-    ;; Timing info
-    (when started-at
-      (insert prefix)
-      (if completed-at
-          (insert (propertize (format "Duration: %s"
-                                      (agent-shell-claude-agents-tracker--format-duration started-at completed-at))
-                              'face 'agent-shell-claude-agents-tracker-meta))
-        (insert (propertize (format "Started: %s"
-                                    (agent-shell-claude-agents-tracker--format-time-ago started-at))
-                            'face 'agent-shell-claude-agents-tracker-meta)))
-      (insert "\n"))
-    ;; Send message button (if team member)
-    (when (and team-name
-               member-name
-               (not (string-empty-p (or team-name "")))
-               (not (string-empty-p (or member-name ""))))
-      (insert prefix)
-      (insert-text-button "✉ Send message"
-                          'face 'agent-shell-claude-agents-tracker-expand-button
-                          'action (lambda (button)
-                                    (agent-shell-claude-agents-tracker-message-teammate
-                                     (button-get button 'teammate-name)
-                                     (button-get button 'team-name)))
-                          'teammate-name member-name
-                          'team-name team-name
-                          'help-echo (format "Send message to %s" member-name))
-      (insert "\n"))
-    ;; Show more section (if prompt, output, or messages available)
-    (when has-more
-      (let ((toggle-text (if expanded "▼ Hide details" "▶ Show details")))
-        (insert prefix)
-        (insert-text-button toggle-text
-                            'face 'agent-shell-claude-agents-tracker-expand-button
-                            'action (lambda (button)
-                                      (let ((key (button-get button 'expand-key))
-                                            (name (button-get button 'agent-name)))
-                                        (agent-shell-claude-agents-tracker-toggle-output key)
-                                        ;; Mark messages as read when expanding
-                                        (when name
-                                          (agent-shell-claude-agents-tracker--mark-messages-read name))))
-                            'expand-key expand-key
-                            'agent-name agent-name
-                            'help-echo "Click to toggle details")
-        ;; Unread indicator
-        (when has-unread
+         (start-pos (point))
+         ;; Compact format components
+         (status-indicator (agent-shell-claude-agents-tracker--status-indicator status))
+         (compact-duration (if completed-at
+                               (agent-shell-claude-agents-tracker--format-duration-compact started-at completed-at)
+                             (agent-shell-claude-agents-tracker--format-elapsed-compact started-at)))
+         (compact-desc (agent-shell-claude-agents-tracker--truncate-description description 30)))
+    (if expanded
+        ;; === EXPANDED VIEW: Full details ===
+        (progn
+          ;; Header line
+          (insert prefix)
+          (insert-text-button "▼"
+                              'face 'agent-shell-claude-agents-tracker-expand-button
+                              'action (lambda (button)
+                                        (agent-shell-claude-agents-tracker-toggle-output
+                                         (button-get button 'expand-key)))
+                              'expand-key expand-key
+                              'help-echo "Click to collapse")
           (insert " ")
-          (insert (propertize (format "(New: %d unread)" unread-count)
-                              'face 'agent-shell-claude-agents-tracker-unread)))
-        ;; Waiting for response indicator
-        (when is-waiting
+          (insert (propertize status-indicator
+                              'face (agent-shell-claude-agents-tracker--status-face status)))
           (insert " ")
-          (insert (propertize (format "%s Waiting for response..."
-                                      (nth (mod agent-shell-claude-agents-tracker--spinner-index
-                                                (length agent-shell-claude-agents-tracker--spinner-frames))
-                                           agent-shell-claude-agents-tracker--spinner-frames))
-                              'face 'agent-shell-claude-agents-tracker-waiting)))
-        (insert "\n"))
-      (when expanded
-        ;; Mark messages as read
-        (when agent-name
-          (agent-shell-claude-agents-tracker--mark-messages-read agent-name))
-        ;; Separator
-        (insert prefix)
-        (insert (propertize (make-string 40 ?─) 'face 'agent-shell-claude-agents-tracker-meta))
-        (insert "\n")
-        ;; Show messages if available
-        (when messages
-          (insert prefix)
-          (insert (propertize (format "Messages (%d)" (length messages))
-                              'face 'agent-shell-claude-agents-tracker-section-label))
+          (insert (propertize (or type "Agent") 'face 'agent-shell-claude-agents-tracker-type))
+          (when has-unread
+            (insert " ")
+            (insert (propertize (format "[%d]" unread-count)
+                                'face 'agent-shell-claude-agents-tracker-unread)))
+          (when is-waiting
+            (insert " ")
+            (insert (propertize (format "%s"
+                                        (nth (mod agent-shell-claude-agents-tracker--spinner-index
+                                                  (length agent-shell-claude-agents-tracker--spinner-frames))
+                                             agent-shell-claude-agents-tracker--spinner-frames))
+                                'face 'agent-shell-claude-agents-tracker-waiting)))
           (insert "\n")
-          (let ((msg-index 0))
-            (dolist (msg messages)
-              (let* ((text (plist-get msg :text))
-                     (summary (plist-get msg :summary))
-                     (timestamp (plist-get msg :timestamp))
-                     (msg-key (format "%s:%d" (or agent-name "unknown") msg-index))
-                     (msg-collapsed (gethash msg-key agent-shell-claude-agents-tracker--collapsed-messages))
-                     (msg-start-pos (point)))
-                (insert prefix "  ")
-                ;; Collapse/expand button
-                (insert-text-button (if msg-collapsed "▶" "▼")
-                                    'face 'agent-shell-claude-agents-tracker-expand-button
-                                    'action (lambda (button)
-                                              (agent-shell-claude-agents-tracker-toggle-message
-                                               (button-get button 'message-key)))
-                                    'message-key msg-key
-                                    'help-echo "Click to toggle message")
-                (insert " ")
-                (when timestamp
-                  (insert (propertize (format "[%s] " timestamp)
-                                      'face 'agent-shell-claude-agents-tracker-inbox-timestamp)))
-                (when summary
-                  (insert (propertize summary 'face 'agent-shell-claude-agents-tracker-meta)))
-                (insert "\n")
-                ;; Only show content if not collapsed
-                (unless msg-collapsed
-                  (when text
-                    (let* ((truncated (agent-shell-claude-agents-tracker--truncate-output
-                                       text agent-shell-claude-agents-tracker-output-max-lines))
-                           (is-truncated (agent-shell-claude-agents-tracker--text-truncated-p
-                                          text agent-shell-claude-agents-tracker-output-max-lines)))
-                      (dolist (line (split-string truncated "\n"))
-                        (insert prefix "    ")
-                        (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
-                        (insert "\n"))
-                      ;; Add "View full" button if truncated
-                      (when is-truncated
-                        (insert prefix "    ")
-                        (insert-text-button "📄 View full"
-                                            'face 'agent-shell-claude-agents-tracker-expand-button
-                                            'action (lambda (button)
-                                                      (agent-shell-claude-agents-tracker-view-full-message
-                                                       (button-get button 'agent-name)
-                                                       (button-get button 'full-text)
-                                                       (button-get button 'summary)
-                                                       (button-get button 'timestamp)))
-                                            'agent-name agent-name
-                                            'full-text text
-                                            'summary summary
-                                            'timestamp timestamp
-                                            'help-echo "View full message in separate buffer")
-                        (insert "\n"))))
-                  (insert "\n"))
-                ;; Add message-key property to entire message area
-                (put-text-property msg-start-pos (point) 'message-key msg-key))
-              (setq msg-index (1+ msg-index))))))
-        ;; Show prompt if available
-        (when prompt
-          (insert prefix)
-          (insert (propertize "Prompt" 'face 'agent-shell-claude-agents-tracker-section-label))
-          (insert "\n")
-          (let ((truncated-prompt (agent-shell-claude-agents-tracker--truncate-output
-                                   prompt agent-shell-claude-agents-tracker-output-max-lines)))
-            (dolist (line (split-string truncated-prompt "\n"))
-              (insert prefix "  ")
-              (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
-              (insert "\n")))
-          (insert "\n"))
-        ;; Show output if available (with collapsible format like messages)
-        (when output
-          (insert prefix)
-          (insert (propertize "Output" 'face 'agent-shell-claude-agents-tracker-section-label))
-          (insert "\n")
-          (let* ((output-key (format "%s:output" (or expand-key "unknown")))
-                 (output-collapsed (gethash output-key agent-shell-claude-agents-tracker--collapsed-messages))
-                 (truncated (agent-shell-claude-agents-tracker--truncate-output
-                             output agent-shell-claude-agents-tracker-output-max-lines))
-                 (is-truncated (agent-shell-claude-agents-tracker--text-truncated-p
-                                output agent-shell-claude-agents-tracker-output-max-lines))
-                 (output-start-pos (point)))
+          ;; Full description
+          (when description
             (insert prefix "  ")
-            ;; Collapse/expand button
-            (insert-text-button (if output-collapsed "▶" "▼")
+            (insert description)
+            (insert "\n"))
+          ;; Timing info
+          (when started-at
+            (insert prefix "  ")
+            (if completed-at
+                (insert (propertize (format "Duration: %s"
+                                            (agent-shell-claude-agents-tracker--format-duration started-at completed-at))
+                                    'face 'agent-shell-claude-agents-tracker-meta))
+              (insert (propertize (format "Started: %s"
+                                          (agent-shell-claude-agents-tracker--format-time-ago started-at))
+                                  'face 'agent-shell-claude-agents-tracker-meta)))
+            (insert "\n"))
+          ;; Send message button (if team member)
+          (when (and team-name member-name
+                     (not (string-empty-p (or team-name "")))
+                     (not (string-empty-p (or member-name ""))))
+            (insert prefix "  ")
+            (insert-text-button "✉ Send message"
                                 'face 'agent-shell-claude-agents-tracker-expand-button
                                 'action (lambda (button)
-                                          (agent-shell-claude-agents-tracker-toggle-message
-                                           (button-get button 'message-key)))
-                                'message-key output-key
-                                'help-echo "Click to toggle output")
-            (insert " ")
-            (insert (propertize (or description type "Agent result")
-                                'face 'agent-shell-claude-agents-tracker-meta))
+                                          (agent-shell-claude-agents-tracker-message-teammate
+                                           (button-get button 'teammate-name)
+                                           (button-get button 'team-name)))
+                                'teammate-name member-name
+                                'team-name team-name
+                                'help-echo (format "Send message to %s" member-name))
+            (insert "\n"))
+          ;; Mark messages as read
+          (when agent-name
+            (agent-shell-claude-agents-tracker--mark-messages-read agent-name))
+          ;; Separator
+          (insert prefix "  ")
+          (insert (propertize (make-string 40 ?─) 'face 'agent-shell-claude-agents-tracker-meta))
+          (insert "\n")
+          ;; Show messages if available
+          (when messages
+            (insert prefix "  ")
+            (insert (propertize (format "Messages (%d)" (length messages))
+                                'face 'agent-shell-claude-agents-tracker-section-label))
             (insert "\n")
-            ;; Only show content if not collapsed
-            (unless output-collapsed
-              (dolist (line (split-string truncated "\n"))
+            (let ((msg-index 0))
+              (dolist (msg messages)
+                (let* ((text (plist-get msg :text))
+                       (summary (plist-get msg :summary))
+                       (timestamp (plist-get msg :timestamp))
+                       (msg-key (format "%s:%d" (or agent-name "unknown") msg-index))
+                       (msg-collapsed (gethash msg-key agent-shell-claude-agents-tracker--collapsed-messages))
+                       (msg-start-pos (point)))
+                  (insert prefix "    ")
+                  ;; Collapse/expand button
+                  (insert-text-button (if msg-collapsed "▶" "▼")
+                                      'face 'agent-shell-claude-agents-tracker-expand-button
+                                      'action (lambda (button)
+                                                (agent-shell-claude-agents-tracker-toggle-message
+                                                 (button-get button 'message-key)))
+                                      'message-key msg-key
+                                      'help-echo "Click to toggle message")
+                  (insert " ")
+                  (when timestamp
+                    (insert (propertize (format "[%s] " timestamp)
+                                        'face 'agent-shell-claude-agents-tracker-inbox-timestamp)))
+                  (when summary
+                    (insert (propertize summary 'face 'agent-shell-claude-agents-tracker-meta)))
+                  (insert "\n")
+                  ;; Only show content if not collapsed
+                  (unless msg-collapsed
+                    (when text
+                      (let* ((truncated (agent-shell-claude-agents-tracker--truncate-output
+                                         text agent-shell-claude-agents-tracker-output-max-lines))
+                             (is-truncated (agent-shell-claude-agents-tracker--text-truncated-p
+                                            text agent-shell-claude-agents-tracker-output-max-lines)))
+                        (dolist (line (split-string truncated "\n"))
+                          (insert prefix "      ")
+                          (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
+                          (insert "\n"))
+                        ;; Add "View full" button if truncated
+                        (when is-truncated
+                          (insert prefix "      ")
+                          (insert-text-button "📄 View full"
+                                              'face 'agent-shell-claude-agents-tracker-expand-button
+                                              'action (lambda (button)
+                                                        (agent-shell-claude-agents-tracker-view-full-message
+                                                         (button-get button 'agent-name)
+                                                         (button-get button 'full-text)
+                                                         (button-get button 'summary)
+                                                         (button-get button 'timestamp)))
+                                              'agent-name agent-name
+                                              'full-text text
+                                              'summary summary
+                                              'timestamp timestamp
+                                              'help-echo "View full message in separate buffer")
+                          (insert "\n"))))
+                    (insert "\n"))
+                  ;; Add message-key property to entire message area
+                  (put-text-property msg-start-pos (point) 'message-key msg-key))
+                (setq msg-index (1+ msg-index)))))
+          ;; Show prompt if available
+          (when prompt
+            (insert prefix "  ")
+            (insert (propertize "Prompt" 'face 'agent-shell-claude-agents-tracker-section-label))
+            (insert "\n")
+            (let ((truncated-prompt (agent-shell-claude-agents-tracker--truncate-output
+                                     prompt agent-shell-claude-agents-tracker-output-max-lines)))
+              (dolist (line (split-string truncated-prompt "\n"))
                 (insert prefix "    ")
                 (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
-                (insert "\n"))
-              ;; Add "View full" button if truncated
-              (when is-truncated
-                (insert prefix "    ")
-                (insert-text-button "📄 View full"
-                                    'face 'agent-shell-claude-agents-tracker-expand-button
-                                    'action (lambda (button)
-                                              (agent-shell-claude-agents-tracker-view-full-message
-                                               (button-get button 'agent-name)
-                                               (button-get button 'full-text)
-                                               (button-get button 'summary)
-                                               (button-get button 'timestamp)))
-                                    'agent-name agent-name
-                                    'full-text output
-                                    'summary (or description type "Agent output")
-                                    'timestamp (when completed-at (format-time-string "%H:%M:%S" completed-at))
-                                    'help-echo "View full output in separate buffer")
                 (insert "\n")))
-            ;; Add message-key property to entire output area (for > and < bindings)
-            (put-text-property output-start-pos (point) 'message-key output-key))))
+            (insert "\n"))
+          ;; Show output if available (with collapsible format like messages)
+          (when output
+            (insert prefix "  ")
+            (insert (propertize "Output" 'face 'agent-shell-claude-agents-tracker-section-label))
+            (insert "\n")
+            (let* ((output-key (format "%s:output" (or expand-key "unknown")))
+                   (output-collapsed (gethash output-key agent-shell-claude-agents-tracker--collapsed-messages))
+                   (truncated (agent-shell-claude-agents-tracker--truncate-output
+                               output agent-shell-claude-agents-tracker-output-max-lines))
+                   (is-truncated (agent-shell-claude-agents-tracker--text-truncated-p
+                                  output agent-shell-claude-agents-tracker-output-max-lines))
+                   (output-start-pos (point)))
+              (insert prefix "    ")
+              ;; Collapse/expand button
+              (insert-text-button (if output-collapsed "▶" "▼")
+                                  'face 'agent-shell-claude-agents-tracker-expand-button
+                                  'action (lambda (button)
+                                            (agent-shell-claude-agents-tracker-toggle-message
+                                             (button-get button 'message-key)))
+                                  'message-key output-key
+                                  'help-echo "Click to toggle output")
+              (insert " ")
+              (insert (propertize (or description type "Agent result")
+                                  'face 'agent-shell-claude-agents-tracker-meta))
+              (insert "\n")
+              ;; Only show content if not collapsed
+              (unless output-collapsed
+                (dolist (line (split-string truncated "\n"))
+                  (insert prefix "      ")
+                  (insert (propertize line 'face 'agent-shell-claude-agents-tracker-output))
+                  (insert "\n"))
+                ;; Add "View full" button if truncated
+                (when is-truncated
+                  (insert prefix "      ")
+                  (insert-text-button "📄 View full"
+                                      'face 'agent-shell-claude-agents-tracker-expand-button
+                                      'action (lambda (button)
+                                                (agent-shell-claude-agents-tracker-view-full-message
+                                                 (button-get button 'agent-name)
+                                                 (button-get button 'full-text)
+                                                 (button-get button 'summary)
+                                                 (button-get button 'timestamp)))
+                                      'agent-name agent-name
+                                      'full-text output
+                                      'summary (or description type "Agent output")
+                                      'timestamp (when completed-at (format-time-string "%H:%M:%S" completed-at))
+                                      'help-echo "View full output in separate buffer")
+                  (insert "\n")))
+              ;; Add message-key property to entire output area (for > and < bindings)
+              (put-text-property output-start-pos (point) 'message-key output-key))))
+      ;; === COMPACT VIEW: Single line ===
+      ;; Format: ▶ ● Type  Description...  2m [3]
+      (insert prefix)
+      (insert-text-button "▶"
+                          'face 'agent-shell-claude-agents-tracker-expand-button
+                          'action (lambda (button)
+                                    (let ((key (button-get button 'expand-key))
+                                          (name (button-get button 'agent-name)))
+                                      (agent-shell-claude-agents-tracker-toggle-output key)
+                                      (when name
+                                        (agent-shell-claude-agents-tracker--mark-messages-read name))))
+                          'expand-key expand-key
+                          'agent-name agent-name
+                          'help-echo "Click to expand")
+      (insert " ")
+      (insert (propertize status-indicator
+                          'face (agent-shell-claude-agents-tracker--status-face status)))
+      (insert " ")
+      (insert (propertize (or type "Agent") 'face 'agent-shell-claude-agents-tracker-type))
+      (insert "  ")
+      (when (and compact-desc (not (string-empty-p compact-desc)))
+        (insert (propertize compact-desc 'face 'agent-shell-claude-agents-tracker-meta))
+        (insert "  "))
+      (when (and compact-duration (not (string-empty-p compact-duration)))
+        (insert (propertize compact-duration 'face 'agent-shell-claude-agents-tracker-meta)))
+      (when has-unread
+        (insert " ")
+        (insert (propertize (format "[%d]" unread-count)
+                            'face 'agent-shell-claude-agents-tracker-unread)))
+      (when is-waiting
+        (insert " ")
+        (insert (propertize (format "%s"
+                                    (nth (mod agent-shell-claude-agents-tracker--spinner-index
+                                              (length agent-shell-claude-agents-tracker--spinner-frames))
+                                         agent-shell-claude-agents-tracker--spinner-frames))
+                            'face 'agent-shell-claude-agents-tracker-waiting)))
+      (insert "\n"))
     ;; Spacing between agents
     (insert "\n")
     ;; Store position for navigation
