@@ -494,7 +494,9 @@ TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
          (expand-key (or tool-call-id agent-name))
          (expanded (and expand-key
                         (gethash expand-key agent-shell-claude-agents-tracker--expanded-agents)))
-         (has-more (or prompt output messages))
+         (is-waiting (and agent-name
+                          (gethash agent-name agent-shell-claude-agents-tracker--waiting-for-response)))
+         (has-more (or prompt output messages is-waiting))
          (prefix "  ")
          (start-pos (point)))
     ;; Main line with status and type
@@ -559,7 +561,7 @@ TEAM-NAME and MEMBER-NAME are optional for team members to enable messaging."
           (insert (propertize (format "(New: %d unread)" unread-count)
                               'face 'agent-shell-claude-agents-tracker-unread)))
         ;; Waiting for response indicator
-        (when (and agent-name (gethash agent-name agent-shell-claude-agents-tracker--waiting-for-response))
+        (when is-waiting
           (insert " ")
           (insert (propertize (format "%s Waiting for response..."
                                       (nth (mod agent-shell-claude-agents-tracker--spinner-index
