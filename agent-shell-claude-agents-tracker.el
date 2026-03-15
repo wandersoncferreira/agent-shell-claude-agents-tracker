@@ -553,7 +553,7 @@ Uses compact one-line format when collapsed, full details when expanded."
                                 'face 'agent-shell-claude-agents-tracker-unread)))
           (when is-waiting
             (insert " ")
-            (insert (propertize "⏳" 'face 'agent-shell-claude-agents-tracker-waiting)))
+            (insert (propertize "⏳ Waiting for response..." 'face 'agent-shell-claude-agents-tracker-waiting)))
           (insert "\n")
           ;; Full description
           (when description
@@ -748,7 +748,7 @@ Uses compact one-line format when collapsed, full details when expanded."
                             'face 'agent-shell-claude-agents-tracker-unread)))
       (when is-waiting
         (insert " ")
-        (insert (propertize "⏳" 'face 'agent-shell-claude-agents-tracker-waiting)))
+        (insert (propertize "⏳ Waiting for response..." 'face 'agent-shell-claude-agents-tracker-waiting)))
       (insert "\n"))
     ;; Spacing between agents
     (insert "\n")
