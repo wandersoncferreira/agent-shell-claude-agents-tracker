@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- All faces now inherit from standard Emacs faces instead of hardcoded hex colors (closes #9)
+  - Works with any Emacs theme (dark, light, high-contrast)
+  - Uses: `success`, `error`, `warning`, `shadow`, `font-lock-type-face`, `font-lock-keyword-face`, `link`
 ### Added
 
 - Compact one-line agent headers for better scannability (closes #5)
