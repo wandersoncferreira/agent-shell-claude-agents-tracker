@@ -66,10 +66,6 @@
   :type 'integer
   :group 'agent-shell-claude-agents-tracker)
 
-(defcustom agent-shell-claude-agents-tracker-inbox-poll-interval 5
-  "Seconds between polling team inboxes for new messages."
-  :type 'integer
-  :group 'agent-shell-claude-agents-tracker)
 
 (defface agent-shell-claude-agents-tracker-running
   '((t :inherit success :weight bold))
@@ -144,8 +140,8 @@ Each plist contains:
 (defvar agent-shell-claude-agents-tracker--refresh-timer nil
   "Timer for auto-refresh.")
 
-(defvar agent-shell-claude-agents-tracker--inbox-timer nil
-  "Timer for polling inbox messages.")
+(defvar agent-shell-claude-agents-tracker--inbox-watchers nil
+  "List of file-notify descriptors for inbox files.")
 
 (defvar agent-shell-claude-agents-tracker--seen-messages (make-hash-table :test 'equal)
   "Hash table tracking seen message timestamps per inbox file.
@@ -343,11 +339,12 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
         ('deleted
          (let ((team-name (file-name-base (directory-file-name
                                            (file-name-directory file)))))
-           (remhash team-name agent-shell-claude-agents-tracker--teams)))))
-    (agent-shell-claude-agents-tracker--refresh-display)))
+           (remhash team-name agent-shell-claude-agents-tracker--teams))))
+      (agent-shell-claude-agents-tracker--refresh-display))))
 
 (defun agent-shell-claude-agents-tracker--parse-team-config (file)
-  "Parse team config FILE and update team tracking."
+  "Parse team config FILE and update team tracking.
+Also sets up a file watcher for the team's inbox."
   (when (file-exists-p file)
     (condition-case err
         (let* ((json-object-type 'alist)
@@ -355,13 +352,16 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
                (config (json-read-file file))
                (team-name (file-name-base (directory-file-name
                                            (file-name-directory file))))
+               (team-dir (file-name-directory file))
                (members (cdr (assq 'members config))))
           (puthash team-name
                    (list :name team-name
                          :config-file file
                          :members members
                          :updated-at (current-time))
-                   agent-shell-claude-agents-tracker--teams))
+                   agent-shell-claude-agents-tracker--teams)
+          ;; Set up inbox watcher for this team
+          (agent-shell-claude-agents-tracker--watch-team-inbox team-dir))
       (error (message "agent-shell-claude-agents-tracker: Error parsing %s: %s" file err)))))
 
 (defun agent-shell-claude-agents-tracker--start-file-watchers ()
@@ -386,7 +386,69 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
   "Stop all file watchers."
   (dolist (descriptor agent-shell-claude-agents-tracker--file-watchers)
     (ignore-errors (file-notify-rm-watch descriptor)))
-  (setq agent-shell-claude-agents-tracker--file-watchers nil))
+  (setq agent-shell-claude-agents-tracker--file-watchers nil)
+  ;; Also stop inbox watchers
+  (agent-shell-claude-agents-tracker--stop-inbox-watchers))
+
+(defun agent-shell-claude-agents-tracker--stop-inbox-watchers ()
+  "Stop all inbox file watchers."
+  (dolist (descriptor agent-shell-claude-agents-tracker--inbox-watchers)
+    (ignore-errors (file-notify-rm-watch descriptor)))
+  (setq agent-shell-claude-agents-tracker--inbox-watchers nil))
+
+(defun agent-shell-claude-agents-tracker--watch-team-inbox (team-dir)
+  "Set up a file watcher for the inbox in TEAM-DIR."
+  (let ((inbox-dir (expand-file-name "inboxes" team-dir)))
+    ;; Watch the inboxes directory for changes
+    ;; This handles both creation of new inbox files and updates to existing ones
+    (when (file-directory-p inbox-dir)
+      (push (file-notify-add-watch inbox-dir
+                                   '(change)
+                                   #'agent-shell-claude-agents-tracker--on-inbox-change)
+            agent-shell-claude-agents-tracker--inbox-watchers))))
+
+(defun agent-shell-claude-agents-tracker--on-inbox-change (event)
+  "Handle file change EVENT in an inbox directory."
+  (let ((action (nth 1 event))
+        (file (nth 2 event)))
+    (when (and file
+               (string-suffix-p ".json" file)
+               (member action '(created changed)))
+      ;; Process inbox changes - reuse existing poll logic for this file
+      (agent-shell-claude-agents-tracker--process-inbox-file file))))
+
+(defun agent-shell-claude-agents-tracker--process-inbox-file (inbox-file)
+  "Process INBOX-FILE for new messages."
+  (when (file-exists-p inbox-file)
+    (let* ((all-messages (agent-shell-claude-agents-tracker--parse-inbox inbox-file))
+           (messages (agent-shell-claude-agents-tracker--filter-real-messages all-messages))
+           (seen-count (or (gethash inbox-file agent-shell-claude-agents-tracker--seen-messages) 0))
+           (current-count (length messages))
+           (team-dir (file-name-directory (directory-file-name (file-name-directory inbox-file))))
+           (team-name (file-name-nondirectory (directory-file-name team-dir))))
+      ;; Check if there are new messages
+      (when (> current-count seen-count)
+        (let ((new-msgs (nthcdr seen-count messages)))
+          (dolist (msg new-msgs)
+            (let* ((from (cdr (assq 'from msg)))
+                   (msg-plist (list :team team-name
+                                    :from from
+                                    :text (cdr (assq 'text msg))
+                                    :summary (cdr (assq 'summary msg))
+                                    :timestamp (cdr (assq 'timestamp msg))
+                                    :color (cdr (assq 'color msg))
+                                    :read nil))
+                   (existing (gethash from agent-shell-claude-agents-tracker--agent-messages)))
+              ;; Clear waiting state for this agent
+              (remhash from agent-shell-claude-agents-tracker--waiting-for-response)
+              ;; Append to agent's message list
+              (puthash from (append existing (list msg-plist))
+                       agent-shell-claude-agents-tracker--agent-messages))))
+        ;; Update seen count
+        (puthash inbox-file current-count agent-shell-claude-agents-tracker--seen-messages)
+        ;; Refresh display and notify
+        (agent-shell-claude-agents-tracker--refresh-display)
+        (message "New message from teammate(s)")))))
 
 ;;; Display / UI
 
@@ -996,42 +1058,6 @@ Returns list of (team-name . inbox-file-path) pairs."
      (not (agent-shell-claude-agents-tracker--is-idle-notification-p msg)))
    messages))
 
-(defun agent-shell-claude-agents-tracker--poll-inboxes ()
-  "Poll all team inboxes for new messages and store them per agent."
-  (let ((inboxes (agent-shell-claude-agents-tracker--find-my-inboxes))
-        (has-new-messages nil))
-    (dolist (inbox-entry inboxes)
-      (let* ((team-name (car inbox-entry))
-             (inbox-file (cdr inbox-entry))
-             (all-messages (agent-shell-claude-agents-tracker--parse-inbox inbox-file))
-             (messages (agent-shell-claude-agents-tracker--filter-real-messages all-messages))
-             (seen-count (or (gethash inbox-file agent-shell-claude-agents-tracker--seen-messages) 0))
-             (current-count (length messages)))
-        ;; Check if there are new messages
-        (when (> current-count seen-count)
-          (setq has-new-messages t)
-          (let ((new-msgs (nthcdr seen-count messages)))
-            (dolist (msg new-msgs)
-              (let* ((from (cdr (assq 'from msg)))
-                     (msg-plist (list :team team-name
-                                      :from from
-                                      :text (cdr (assq 'text msg))
-                                      :summary (cdr (assq 'summary msg))
-                                      :timestamp (cdr (assq 'timestamp msg))
-                                      :color (cdr (assq 'color msg))
-                                      :read nil))
-                     (existing (gethash from agent-shell-claude-agents-tracker--agent-messages)))
-                ;; Clear waiting state for this agent
-                (remhash from agent-shell-claude-agents-tracker--waiting-for-response)
-                ;; Append to agent's message list
-                (puthash from (append existing (list msg-plist))
-                         agent-shell-claude-agents-tracker--agent-messages)))))
-        ;; Update seen count
-        (puthash inbox-file current-count agent-shell-claude-agents-tracker--seen-messages)))
-    ;; Refresh display and notify if new messages
-    (when has-new-messages
-      (agent-shell-claude-agents-tracker--refresh-display)
-      (message "New message from teammate(s)"))))
 
 (defun agent-shell-claude-agents-tracker--agent-has-unread-p (agent-name)
   "Return non-nil if AGENT-NAME has unread messages."
@@ -1050,19 +1076,6 @@ Returns list of (team-name . inbox-file-path) pairs."
       (plist-put msg :read t))
     (puthash agent-name messages agent-shell-claude-agents-tracker--agent-messages)))
 
-(defun agent-shell-claude-agents-tracker--start-inbox-timer ()
-  "Start the inbox polling timer."
-  (agent-shell-claude-agents-tracker--stop-inbox-timer)
-  (setq agent-shell-claude-agents-tracker--inbox-timer
-        (run-with-timer agent-shell-claude-agents-tracker-inbox-poll-interval
-                        agent-shell-claude-agents-tracker-inbox-poll-interval
-                        #'agent-shell-claude-agents-tracker--poll-inboxes)))
-
-(defun agent-shell-claude-agents-tracker--stop-inbox-timer ()
-  "Stop the inbox polling timer."
-  (when agent-shell-claude-agents-tracker--inbox-timer
-    (cancel-timer agent-shell-claude-agents-tracker--inbox-timer)
-    (setq agent-shell-claude-agents-tracker--inbox-timer nil)))
 
 (defun agent-shell-claude-agents-tracker-clear-inbox ()
   "Clear all messages and reset message tracking."
@@ -1074,10 +1087,11 @@ Returns list of (team-name . inbox-file-path) pairs."
     (message "Messages cleared")))
 
 (defun agent-shell-claude-agents-tracker-poll-inbox-now ()
-  "Manually poll inboxes for new messages."
+  "Manually check all inboxes for new messages."
   (interactive)
-  (agent-shell-claude-agents-tracker--poll-inboxes)
-  (message "Inbox poll complete"))
+  (dolist (inbox-entry (agent-shell-claude-agents-tracker--find-my-inboxes))
+    (agent-shell-claude-agents-tracker--process-inbox-file (cdr inbox-entry)))
+  (message "Inbox check complete"))
 
 ;;; Full Message Viewer
 
@@ -1295,9 +1309,9 @@ WARNING: This is destructive and cannot be undone!"
       (dolist (entry agent-shell-claude-agents-tracker--subscriptions)
         (agent-shell-claude-agents-tracker--unsubscribe-from-buffer (car entry)))
       (setq agent-shell-claude-agents-tracker--subscriptions nil)
-      ;; 4. Stop all timers
+      ;; 4. Stop timers and watchers
       (agent-shell-claude-agents-tracker--stop-refresh-timer)
-      (agent-shell-claude-agents-tracker--stop-inbox-timer)
+      (agent-shell-claude-agents-tracker--stop-inbox-watchers)
       ;; 5. Delete team directories (with path validation for each)
       (when (file-directory-p teams-dir)
         (dolist (dir (directory-files teams-dir t "^[^.]"))
@@ -1568,12 +1582,10 @@ Prompts for team name, then teammate, then message content."
         (agent-shell-claude-agents-tracker--subscribe-to-buffer buf))))
   ;; Hook into new buffer creation
   (add-hook 'agent-shell-mode-hook #'agent-shell-claude-agents-tracker--on-buffer-created)
-  ;; Start file watchers
+  ;; Start file watchers (includes inbox watchers)
   (agent-shell-claude-agents-tracker--start-file-watchers)
   ;; Start refresh timer
   (agent-shell-claude-agents-tracker--start-refresh-timer)
-  ;; Start inbox polling timer
-  (agent-shell-claude-agents-tracker--start-inbox-timer)
   ;; Add mode-line indicator
   (when agent-shell-claude-agents-tracker-show-mode-line
     (add-to-list 'global-mode-string '(:eval (agent-shell-claude-agents-tracker--mode-line-string)) t)))
@@ -1586,12 +1598,10 @@ Prompts for team name, then teammate, then message content."
   (setq agent-shell-claude-agents-tracker--subscriptions nil)
   ;; Remove hook
   (remove-hook 'agent-shell-mode-hook #'agent-shell-claude-agents-tracker--on-buffer-created)
-  ;; Stop file watchers
+  ;; Stop file watchers (includes inbox watchers)
   (agent-shell-claude-agents-tracker--stop-file-watchers)
   ;; Stop refresh timer
   (agent-shell-claude-agents-tracker--stop-refresh-timer)
-  ;; Stop inbox polling timer
-  (agent-shell-claude-agents-tracker--stop-inbox-timer)
   ;; Remove mode-line indicator
   (setq global-mode-string
         (delete '(:eval (agent-shell-claude-agents-tracker--mode-line-string))
