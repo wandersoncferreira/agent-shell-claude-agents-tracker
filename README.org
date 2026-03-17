@@ -61,23 +61,39 @@ add to your config.el file
 | =M-x agent-shell-claude-agents-tracker-toggle=       | Toggle buffer visibility                   |
 | =M-x agent-shell-claude-agents-tracker-clear=        | Clear all tracked subagents                |
 | =M-x agent-shell-claude-agents-tracker-reset-all=    | Delete a specific team (=C-u= for all)     |
-| =M-x agent-shell-claude-agents-tracker-send-message= | Send message to a teammate                 |
+| =M-x agent-shell-claude-agents-tracker-send-message= | Send message to a teammate (=C-u= quiet)   |
 
 ** Buffer Keybindings
 
-| Key     | Action                           |
-|---------+----------------------------------|
-| =g=     | Refresh                          |
-| =q=     | Hide                             |
-| =c=     | Clear all                        |
-| =R=     | Reset team (=C-u R= for all)     |
-| =m=     | Send message to teammate         |
+| Key     | Action                               |
+|---------+--------------------------------------|
+| =g=     | Refresh                              |
+| =q=     | Hide                                 |
+| =c=     | Clear all                            |
+| =R=     | Reset team (=C-u R= for all)         |
+| =m=     | Send message (=C-u m= for quiet)     |
 | =TAB=   | Toggle details at point          |
 | =RET=   | Toggle details at point          |
 | =e=     | Expand all                       |
 | =E=     | Collapse all                     |
 
 You can also click on =▶ Show details= buttons to expand/collapse, or =✉ Send message= to message teammates.
+
+** Quiet Messages
+
+By default, when you send a message to a teammate, the tracker sets up continuation
+tracking. When all teammates have responded, the team-leader (agent-shell buffer)
+receives a notification to continue processing.
+
+Use =C-u= prefix to send a *quiet* message that does NOT trigger continuation:
+
+#+begin_example
+C-u m           ; quiet message at point
+C-u M-x agent-shell-claude-agents-tracker-send-message
+#+end_example
+
+Quiet messages are useful for casual questions where you don't need the team-leader
+to be notified when the agent responds.
 
 * Configuration
 

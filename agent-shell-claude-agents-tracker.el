@@ -189,6 +189,50 @@ Keys are agent names, values are the timestamp when we started waiting.")
   "Non-nil when we're waiting for agent responses and haven't sent continuation yet.
 This ensures we only send the continuation message once when all agents reply.")
 
+;;; Session ID Helpers
+
+(defun agent-shell-claude-agents-tracker--get-buffer-session-id (buffer)
+  "Get the session ID from an agent-shell BUFFER.
+Returns nil if the buffer is not an agent-shell buffer or has no session."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (boundp 'agent-shell--state)
+        (map-nested-elt agent-shell--state '(:session :id))))))
+
+(defun agent-shell-claude-agents-tracker--find-buffer-for-session (session-id)
+  "Find the agent-shell buffer with the given SESSION-ID.
+Returns nil if no matching buffer is found."
+  (when session-id
+    (seq-find
+     (lambda (buf)
+       (string= session-id
+                (agent-shell-claude-agents-tracker--get-buffer-session-id buf)))
+     (buffer-list))))
+
+(defun agent-shell-claude-agents-tracker--get-teams-for-buffer (buffer)
+  "Get list of teams that belong to the agent-shell BUFFER.
+Returns a list of (team-name . team-plist) pairs."
+  (let ((session-id (agent-shell-claude-agents-tracker--get-buffer-session-id buffer))
+        (result nil))
+    (when session-id
+      (maphash
+       (lambda (name team)
+         (when (string= session-id (plist-get team :lead-session-id))
+           (push (cons name team) result)))
+       agent-shell-claude-agents-tracker--teams))
+    (nreverse result)))
+
+(defun agent-shell-claude-agents-tracker--get-agents-for-buffer (buffer)
+  "Get list of agents spawned from the agent-shell BUFFER.
+Returns a list of (agent-id . agent-plist) pairs."
+  (let ((result nil))
+    (maphash
+     (lambda (id agent)
+       (when (eq buffer (plist-get agent :parent-buffer))
+         (push (cons id agent) result)))
+     agent-shell-claude-agents-tracker--agents)
+    (nreverse result)))
+
 ;;; Event Handling
 
 (defun agent-shell-claude-agents-tracker--get-raw-input-field (raw-input field)
@@ -387,11 +431,13 @@ Also sets up a file watcher for the team's inbox."
                (team-name (file-name-base (directory-file-name
                                            (file-name-directory file))))
                (team-dir (file-name-directory file))
-               (members (cdr (assq 'members config))))
+               (members (cdr (assq 'members config)))
+               (lead-session-id (cdr (assq 'leadSessionId config))))
           (puthash team-name
                    (list :name team-name
                          :config-file file
                          :members members
+                         :lead-session-id lead-session-id
                          :updated-at (current-time))
                    agent-shell-claude-agents-tracker--teams)
           ;; Set up inbox watcher for this team
@@ -961,8 +1007,31 @@ Omits zero-count segments."
             (format "%s | %d unread" main-part unread)
           main-part)))))
 
+(defun agent-shell-claude-agents-tracker--get-active-sessions ()
+  "Get list of active agent-shell buffers that have sessions or content.
+Returns list of (buffer . session-id) pairs, sorted by buffer name."
+  (let ((sessions nil))
+    ;; Collect buffers from subscriptions
+    (dolist (entry agent-shell-claude-agents-tracker--subscriptions)
+      (let* ((buf (car entry))
+             (session-id (agent-shell-claude-agents-tracker--get-buffer-session-id buf)))
+        (when (and (buffer-live-p buf) session-id)
+          (push (cons buf session-id) sessions))))
+    ;; Also check parent buffers of tracked agents
+    (maphash (lambda (_id agent)
+               (let ((buf (plist-get agent :parent-buffer)))
+                 (when (and (buffer-live-p buf)
+                            (not (seq-find (lambda (s) (eq (car s) buf)) sessions)))
+                   (let ((session-id (agent-shell-claude-agents-tracker--get-buffer-session-id buf)))
+                     (when session-id
+                       (push (cons buf session-id) sessions))))))
+             agent-shell-claude-agents-tracker--agents)
+    ;; Sort by buffer name
+    (sort sessions (lambda (a b) (string< (buffer-name (car a)) (buffer-name (car b)))))))
+
 (defun agent-shell-claude-agents-tracker--refresh-display ()
-  "Refresh the tracker buffer display."
+  "Refresh the tracker buffer display.
+Groups agents and teams by their parent agent-shell session."
   (when-let ((buf (get-buffer agent-shell-claude-agents-tracker--buffer-name)))
     (with-current-buffer buf
       (let ((inhibit-read-only t)
@@ -978,62 +1047,112 @@ Omits zero-count segments."
             (insert (propertize summary 'face 'agent-shell-claude-agents-tracker-meta))
             (insert "\n")))
         (insert "\n")
-        ;; Collect team member names to exclude from standalone agents
-        (let ((team-member-names (make-hash-table :test 'equal))
-              (has-content nil))
-          ;; First, collect team member names (to exclude from standalone section)
-          (maphash (lambda (_name team)
-                     (let ((members (plist-get team :members)))
-                       (dolist (member members)
+        ;; Get active sessions
+        (let* ((sessions (agent-shell-claude-agents-tracker--get-active-sessions))
+               (multi-session (> (length sessions) 1))
+               (has-any-content nil))
+          ;; Collect team member names globally to exclude from standalone agents
+          (let ((team-member-names (make-hash-table :test 'equal)))
+            (maphash (lambda (_name team)
+                       (dolist (member (plist-get team :members))
                          (let ((member-name (cdr (assq 'name member))))
                            (when member-name
-                             (puthash member-name t team-member-names))))))
-                   agent-shell-claude-agents-tracker--teams)
-          ;; Display standalone agents FIRST
-          (let ((ungrouped nil))
-            (maphash (lambda (_id agent)
-                       (let ((name (plist-get agent :name)))
-                         (unless (gethash name team-member-names)
-                           (push agent ungrouped))))
-                     agent-shell-claude-agents-tracker--agents)
-            (when ungrouped
-              (setq has-content t)
-              (insert (propertize "Standalone Agents"
-                                  'face 'agent-shell-claude-agents-tracker-parent))
-              (insert "\n")
-              (let ((len (length ungrouped)))
-                (dotimes (i len)
-                  (agent-shell-claude-agents-tracker--insert-subagent
-                   (nth i ungrouped) (= i (1- len)))))))
-          ;; Then, display teams and their members (below standalone)
-          (maphash (lambda (_name team)
-                     (let* ((team-name (plist-get team :name))
-                            (members (plist-get team :members))
-                            ;; Filter out team-lead from display
-                            (non-lead-members (seq-filter
-                                               (lambda (m)
-                                                 (not (equal (cdr (assq 'name m)) "team-lead")))
-                                               members)))
-                       (when non-lead-members
-                         (when has-content
-                           (insert "\n"))
-                         (setq has-content t)
-                         ;; Team header
-                         (insert (propertize (format "Team: %s" team-name)
-                                             'face 'agent-shell-claude-agents-tracker-parent))
-                         (insert "\n")
-                         ;; Insert each member
-                         (dolist (member non-lead-members)
-                           (agent-shell-claude-agents-tracker--insert-team-member member team-name)))))
-                   agent-shell-claude-agents-tracker--teams)
-          ;; Show placeholder if nothing to display
-          (unless has-content
-            (insert (propertize "No agents tracked yet.\n\n"
-                                'face 'agent-shell-claude-agents-tracker-meta)
-                    (propertize "Agents will appear here when Claude Code\n"
-                                'face 'agent-shell-claude-agents-tracker-meta)
-                    (propertize "uses the Agent tool to spawn them.\n"
-                                'face 'agent-shell-claude-agents-tracker-meta))))
+                             (puthash member-name t team-member-names)))))
+                     agent-shell-claude-agents-tracker--teams)
+            ;; Display content grouped by session
+            (if sessions
+                (dolist (session sessions)
+                  (let* ((session-buf (car session))
+                         (session-id (cdr session))
+                         (agents (agent-shell-claude-agents-tracker--get-agents-for-buffer session-buf))
+                         (teams (agent-shell-claude-agents-tracker--get-teams-for-buffer session-buf))
+                         (has-session-content nil))
+                    ;; Filter agents to only standalone ones
+                    (setq agents (seq-filter
+                                  (lambda (a)
+                                    (not (gethash (plist-get (cdr a) :name) team-member-names)))
+                                  agents))
+                    ;; Only show session header if multi-session
+                    (when (and multi-session (or agents teams))
+                      (when has-any-content
+                        (insert "\n"))
+                      (insert (propertize (format "Session: %s\n" (buffer-name session-buf))
+                                          'face 'agent-shell-claude-agents-tracker-header))
+                      (insert (propertize (make-string 40 ?─) 'face 'agent-shell-claude-agents-tracker-meta))
+                      (insert "\n"))
+                    ;; Display standalone agents for this session
+                    (when agents
+                      (setq has-session-content t)
+                      (setq has-any-content t)
+                      (insert (propertize "Standalone Agents"
+                                          'face 'agent-shell-claude-agents-tracker-parent))
+                      (insert "\n")
+                      (let ((len (length agents)))
+                        (dotimes (i len)
+                          (agent-shell-claude-agents-tracker--insert-subagent
+                           (cdr (nth i agents)) (= i (1- len))))))
+                    ;; Display teams for this session
+                    (dolist (team-entry teams)
+                      (let* ((team-name (car team-entry))
+                             (team (cdr team-entry))
+                             (members (plist-get team :members))
+                             (non-lead-members (seq-filter
+                                                (lambda (m)
+                                                  (not (equal (cdr (assq 'name m)) "team-lead")))
+                                                members)))
+                        (when non-lead-members
+                          (when has-session-content
+                            (insert "\n"))
+                          (setq has-session-content t)
+                          (setq has-any-content t)
+                          ;; Team header with session context
+                          (insert (propertize (format "Team: %s" team-name)
+                                              'face 'agent-shell-claude-agents-tracker-parent))
+                          (insert "\n")
+                          ;; Insert each member
+                          (dolist (member non-lead-members)
+                            (agent-shell-claude-agents-tracker--insert-team-member member team-name)))))))
+              ;; No sessions - show orphaned content if any
+              (let ((ungrouped nil))
+                (maphash (lambda (_id agent)
+                           (unless (gethash (plist-get agent :name) team-member-names)
+                             (push agent ungrouped)))
+                         agent-shell-claude-agents-tracker--agents)
+                (when ungrouped
+                  (setq has-any-content t)
+                  (insert (propertize "Standalone Agents"
+                                      'face 'agent-shell-claude-agents-tracker-parent))
+                  (insert "\n")
+                  (let ((len (length ungrouped)))
+                    (dotimes (i len)
+                      (agent-shell-claude-agents-tracker--insert-subagent
+                       (nth i ungrouped) (= i (1- len)))))))
+              ;; Display orphaned teams
+              (maphash (lambda (_name team)
+                         (let* ((team-name (plist-get team :name))
+                                (members (plist-get team :members))
+                                (non-lead-members (seq-filter
+                                                   (lambda (m)
+                                                     (not (equal (cdr (assq 'name m)) "team-lead")))
+                                                   members)))
+                           (when non-lead-members
+                             (when has-any-content
+                               (insert "\n"))
+                             (setq has-any-content t)
+                             (insert (propertize (format "Team: %s" team-name)
+                                                 'face 'agent-shell-claude-agents-tracker-parent))
+                             (insert "\n")
+                             (dolist (member non-lead-members)
+                               (agent-shell-claude-agents-tracker--insert-team-member member team-name)))))
+                       agent-shell-claude-agents-tracker--teams))
+            ;; Show placeholder if nothing to display
+            (unless has-any-content
+              (insert (propertize "No agents tracked yet.\n\n"
+                                  'face 'agent-shell-claude-agents-tracker-meta)
+                      (propertize "Agents will appear here when Claude Code\n"
+                                  'face 'agent-shell-claude-agents-tracker-meta)
+                      (propertize "uses the Agent tool to spawn them.\n"
+                                  'face 'agent-shell-claude-agents-tracker-meta)))))
         (goto-char (min pos (point-max)))))))
 
 ;;; Mode-line
@@ -1104,16 +1223,18 @@ Returns list of (team-name . inbox-file-path) pairs."
 
 (defun agent-shell-claude-agents-tracker--send-continuation (team-name)
   "Send continuation message to team-lead after all agents have responded.
-TEAM-NAME is the name of the team whose agents have all responded."
+TEAM-NAME is the name of the team whose agents have all responded.
+Uses the correct session buffer based on the team's leadSessionId."
   ;; Clear the continuation-pending flag first to prevent duplicate sends
   (setq agent-shell-claude-agents-tracker--continuation-pending nil)
-  (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer)))
+  (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer team-name)))
     (when shell-buf
       (with-current-buffer shell-buf
         (agent-shell--send-command
          :prompt (format "All teammates from team \"%s\" have responded to your messages. Check the Code Agents tracker (M-x agent-shell-claude-agents-tracker-show) to view their replies." team-name)
          :shell-buffer shell-buf))
-      (message "All agents have responded - continuation sent to team-lead"))))
+      (message "All agents have responded - continuation sent to team-lead via %s"
+               (buffer-name shell-buf)))))
 
 
 (defun agent-shell-claude-agents-tracker--agent-has-unread-p (agent-name)
@@ -1475,45 +1596,61 @@ WARNING: This is destructive and cannot be undone!"
   (clrhash agent-shell-claude-agents-tracker--expanded-agents)
   (agent-shell-claude-agents-tracker--refresh-display))
 
-(defun agent-shell-claude-agents-tracker-message-teammate (teammate-name team-name)
+(defun agent-shell-claude-agents-tracker-message-teammate (teammate-name team-name &optional quiet)
   "Send a message to TEAMMATE-NAME in TEAM-NAME.
-Sends the message request directly to the parent agent-shell session."
+Sends the message request directly to the parent agent-shell session.
+Uses the correct session buffer based on the team's leadSessionId.
+
+With prefix argument (C-u), sends a \"quiet\" message that does NOT
+trigger continuation tracking - the team-leader won't be notified
+when the agent responds."
   (interactive
    (let ((name (get-text-property (point) 'claude-teammate-name))
          (team (get-text-property (point) 'claude-team-name)))
      (if name
-         (list name team)
+         (list name team current-prefix-arg)
        (user-error "No teammate at point"))))
-  (let ((msg-text (read-string (format "Message to %s: " teammate-name))))
+  (let ((msg-text (read-string (format "Message to %s%s: "
+                                       teammate-name
+                                       (if quiet " (quiet)" "")))))
     (when (and msg-text (not (string-empty-p msg-text)))
-      (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer)))
+      (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer team-name)))
         (if shell-buf
             (let ((input (format "Send message to teammate \"%s\": %s"
                                  teammate-name msg-text)))
-              ;; Set waiting state and enable continuation tracking
-              (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
-              (setq agent-shell-claude-agents-tracker--continuation-pending t)
+              ;; Only set waiting state if not quiet mode
+              (unless quiet
+                (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
+                (setq agent-shell-claude-agents-tracker--continuation-pending t))
               ;; Call from within the buffer context so it can access session state
               (with-current-buffer shell-buf
                 (agent-shell--send-command :prompt input :shell-buffer shell-buf))
               (agent-shell-claude-agents-tracker--refresh-display)
-              (message "Message sent to %s" teammate-name))
-          (user-error "No agent-shell buffer found"))))))
+              (message "Message sent to %s (via %s)%s"
+                       teammate-name
+                       (buffer-name shell-buf)
+                       (if quiet " [quiet]" "")))
+          (user-error "No agent-shell buffer found for team %s" team-name))))))
 
-(defun agent-shell-claude-agents-tracker-message-at-point ()
-  "Send a message to the teammate at point."
-  (interactive)
+(defun agent-shell-claude-agents-tracker-message-at-point (&optional quiet)
+  "Send a message to the teammate at point.
+With prefix argument (C-u), sends a \"quiet\" message without continuation."
+  (interactive "P")
   (let ((name (get-text-property (point) 'claude-teammate-name))
         (team (get-text-property (point) 'claude-team-name)))
     (if name
-        (agent-shell-claude-agents-tracker-message-teammate name team)
+        (agent-shell-claude-agents-tracker-message-teammate name team quiet)
       (message "No teammate at point"))))
 
 ;;;###autoload
-(defun agent-shell-claude-agents-tracker-send-message ()
+(defun agent-shell-claude-agents-tracker-send-message (&optional quiet)
   "Interactively select a team and teammate, then send a message.
-Prompts for team name, then teammate, then message content."
-  (interactive)
+Prompts for team name, then teammate, then message content.
+
+With prefix argument (C-u), sends a \"quiet\" message that does NOT
+trigger continuation tracking - the team-leader won't be notified
+when the agent responds."
+  (interactive "P")
   ;; Ensure teams are loaded
   (agent-shell-claude-agents-tracker--reload-teams)
   (if (zerop (hash-table-count agent-shell-claude-agents-tracker--teams))
@@ -1529,27 +1666,43 @@ Prompts for team name, then teammate, then message content."
       (if (null member-names)
           (user-error "Team %s has no members" team-name)
         (let* ((teammate-name (completing-read
-                               (format "Send message to [%s]: " team-name)
+                               (format "Send message to [%s]%s: "
+                                       team-name
+                                       (if quiet " (quiet)" ""))
                                member-names nil t))
                (msg-text (read-string (format "Message to %s: " teammate-name))))
           (when (and msg-text (not (string-empty-p msg-text)))
-            (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer)))
+            (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer team-name)))
               (if shell-buf
                   (let ((input (format "Send message to teammate \"%s\": %s"
                                        teammate-name msg-text)))
-                    ;; Set waiting state and enable continuation tracking
-                    (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
-                    (setq agent-shell-claude-agents-tracker--continuation-pending t)
+                    ;; Only set waiting state if not quiet mode
+(unless quiet
+                      (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
+                      (setq agent-shell-claude-agents-tracker--continuation-pending t))
                     ;; Call from within the buffer context so it can access session state
                     (with-current-buffer shell-buf
                       (agent-shell--send-command :prompt input :shell-buffer shell-buf))
                     (agent-shell-claude-agents-tracker--refresh-display)
-                    (message "Message sent to %s" teammate-name))
-                (user-error "No agent-shell buffer found")))))))))
+                    (message "Message sent to %s (via %s)%s"
+                             teammate-name
+                             (buffer-name shell-buf)
+                             (if quiet " [quiet]" "")))
+                (user-error "No agent-shell buffer found for team %s" team-name)))))))))
 
-(defun agent-shell-claude-agents-tracker--find-agent-shell-buffer ()
-  "Find an active agent-shell buffer to use for messaging."
-  ;; First try buffers that spawned tracked agents
+(cl-defun agent-shell-claude-agents-tracker--find-agent-shell-buffer (&optional team-name)
+  "Find an active agent-shell buffer to use for messaging.
+If TEAM-NAME is provided, returns the buffer that owns that team's session.
+Otherwise returns any suitable agent-shell buffer."
+  ;; If team-name provided, find the buffer for that team's session
+  (when team-name
+    (let* ((team (gethash team-name agent-shell-claude-agents-tracker--teams))
+           (lead-session-id (plist-get team :lead-session-id)))
+      (when lead-session-id
+        (let ((buf (agent-shell-claude-agents-tracker--find-buffer-for-session lead-session-id)))
+          (when (buffer-live-p buf)
+            (cl-return-from agent-shell-claude-agents-tracker--find-agent-shell-buffer buf))))))
+  ;; Fallback: try buffers that spawned tracked agents
   (let ((parent-bufs (make-hash-table :test 'equal)))
     (maphash (lambda (_id agent)
                (let ((buf (plist-get agent :parent-buffer)))
