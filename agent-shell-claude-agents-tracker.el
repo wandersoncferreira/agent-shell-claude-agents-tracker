@@ -46,6 +46,17 @@
   :type 'boolean
   :group 'agent-shell-claude-agents-tracker)
 
+(defcustom agent-shell-claude-agents-tracker-drop-stale-notifications t
+  "Drop stale notifications from the ACP server.
+
+When non-nil, notifications received while there are no active requests
+are silently dropped.  This prevents stale messages from appearing in
+the agent-shell buffer after talking to agents directly outside of Emacs.
+
+See https://github.com/xenodium/agent-shell/pull/346 for context."
+  :type 'boolean
+  :group 'agent-shell-claude-agents-tracker)
+
 (defcustom agent-shell-claude-agents-tracker-show-mode-line t
   "Show subagent count in mode-line."
   :type 'boolean
@@ -1584,6 +1595,17 @@ Prompts for team name, then teammate, then message content."
     (cancel-timer agent-shell-claude-agents-tracker--refresh-timer)
     (setq agent-shell-claude-agents-tracker--refresh-timer nil)))
 
+;;; Stale Notification Fix
+
+(defun agent-shell-claude-agents-tracker--active-requests-advice (orig-fn state)
+  "Advice to fix stale notification handling.
+When `agent-shell-claude-agents-tracker-drop-stale-notifications' is non-nil,
+this returns non-nil only when there are actual active requests, causing
+stale notifications to be dropped."
+  (if agent-shell-claude-agents-tracker-drop-stale-notifications
+      (not (zerop (or (map-elt state :active-request-count) 0)))
+    (funcall orig-fn state)))
+
 (defun agent-shell-claude-agents-tracker--setup ()
   "Set up the tracker."
   ;; Subscribe to existing agent-shell buffers
@@ -1599,7 +1621,10 @@ Prompts for team name, then teammate, then message content."
   (agent-shell-claude-agents-tracker--start-refresh-timer)
   ;; Add mode-line indicator
   (when agent-shell-claude-agents-tracker-show-mode-line
-    (add-to-list 'global-mode-string '(:eval (agent-shell-claude-agents-tracker--mode-line-string)) t)))
+    (add-to-list 'global-mode-string '(:eval (agent-shell-claude-agents-tracker--mode-line-string)) t))
+  ;; Add stale notification fix advice
+  (advice-add 'agent-shell--active-requests-p
+              :around #'agent-shell-claude-agents-tracker--active-requests-advice))
 
 (defun agent-shell-claude-agents-tracker--teardown ()
   "Tear down the tracker."
@@ -1613,6 +1638,9 @@ Prompts for team name, then teammate, then message content."
   (agent-shell-claude-agents-tracker--stop-file-watchers)
   ;; Stop refresh timer
   (agent-shell-claude-agents-tracker--stop-refresh-timer)
+  ;; Remove stale notification fix advice
+  (advice-remove 'agent-shell--active-requests-p
+                 #'agent-shell-claude-agents-tracker--active-requests-advice)
   ;; Remove mode-line indicator
   (setq global-mode-string
         (delete '(:eval (agent-shell-claude-agents-tracker--mode-line-string))
