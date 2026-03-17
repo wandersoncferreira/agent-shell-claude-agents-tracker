@@ -185,6 +185,10 @@ Keys are \"agent-name:message-index\", values are t if collapsed.")
   "Hash table tracking agents we're waiting for a response from.
 Keys are agent names, values are the timestamp when we started waiting.")
 
+(defvar agent-shell-claude-agents-tracker--continuation-pending nil
+  "Non-nil when we're waiting for agent responses and haven't sent continuation yet.
+This ensures we only send the continuation message once when all agents reply.")
+
 ;;; Event Handling
 
 (defun agent-shell-claude-agents-tracker--get-raw-input-field (raw-input field)
@@ -235,8 +239,25 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
    ;; Or has subagent_type field (unique to Agent tool)
    (agent-shell-claude-agents-tracker--get-raw-input-field raw-input "subagent_type")))
 
+(defun agent-shell-claude-agents-tracker--maybe-track-send-message (title status raw-input)
+  "Track SendMessage tool calls for continuation tracking.
+TITLE is the tool title, STATUS is the current status, RAW-INPUT contains parameters.
+Only tracks direct messages (type=message) to teammates when status is running."
+  (when (and (string= title "SendMessage")
+             (string= status "running"))
+    (let ((msg-type (agent-shell-claude-agents-tracker--get-raw-input-field raw-input "type"))
+          (recipient (agent-shell-claude-agents-tracker--get-raw-input-field raw-input "recipient")))
+      ;; Only track direct messages to teammates
+      (when (and (string= msg-type "message")
+                 recipient
+                 (not (string-empty-p recipient)))
+        ;; Set up waiting-for-response tracking
+        (puthash recipient (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
+        (setq agent-shell-claude-agents-tracker--continuation-pending t)
+        (message "Tracking response from %s" recipient)))))
+
 (defun agent-shell-claude-agents-tracker--on-tool-call (event)
-  "Handle tool-call-update EVENT, detect Agent tool invocations."
+  "Handle tool-call-update EVENT, detect Agent and SendMessage tool invocations."
   (let* ((data (cdr (assq :data event)))
          (tool-call-id (cdr (assq :tool-call-id data)))
          (tool-call (cdr (assq :tool-call data))))
@@ -246,7 +267,7 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
              (raw-input (cdr (assq :raw-input tool-call)))
              (description (cdr (assq :description tool-call)))
              (content (cdr (assq :content tool-call))))
-        ;; Only track actual Agent tool invocations
+        ;; Track Agent tool invocations
         (when (agent-shell-claude-agents-tracker--is-agent-tool-p title raw-input)
           (agent-shell-claude-agents-tracker--register-subagent
            :tool-call-id tool-call-id
@@ -259,7 +280,9 @@ Check for exact title match or presence of subagent_type in RAW-INPUT."
            :status status
            :output (agent-shell-claude-agents-tracker--extract-text-content content)
            :run-in-background (agent-shell-claude-agents-tracker--get-raw-input-field
-                               raw-input "run_in_background")))))))
+                               raw-input "run_in_background")))
+        ;; Track SendMessage tool invocations for continuation tracking
+        (agent-shell-claude-agents-tracker--maybe-track-send-message title status raw-input)))))
 
 (cl-defun agent-shell-claude-agents-tracker--register-subagent
     (&key tool-call-id parent-buffer name type prompt description status output run-in-background)
@@ -436,7 +459,9 @@ Also sets up a file watcher for the team's inbox."
            (seen-count (or (gethash inbox-file agent-shell-claude-agents-tracker--seen-messages) 0))
            (current-count (length messages))
            (team-dir (file-name-directory (directory-file-name (file-name-directory inbox-file))))
-           (team-name (file-name-nondirectory (directory-file-name team-dir))))
+           (team-name (file-name-nondirectory (directory-file-name team-dir)))
+           ;; Track if we cleared any pending responses
+           (cleared-pending-response nil))
       ;; Check if there are new messages
       (when (> current-count seen-count)
         (let ((new-msgs (nthcdr seen-count messages)))
@@ -450,6 +475,9 @@ Also sets up a file watcher for the team's inbox."
                                     :color (cdr (assq 'color msg))
                                     :read nil))
                    (existing (gethash from agent-shell-claude-agents-tracker--agent-messages)))
+              ;; Check if this agent was in our waiting list
+              (when (gethash from agent-shell-claude-agents-tracker--waiting-for-response)
+                (setq cleared-pending-response t))
               ;; Clear waiting state for this agent
               (remhash from agent-shell-claude-agents-tracker--waiting-for-response)
               ;; Append to agent's message list
@@ -459,7 +487,12 @@ Also sets up a file watcher for the team's inbox."
         (puthash inbox-file current-count agent-shell-claude-agents-tracker--seen-messages)
         ;; Refresh display and notify
         (agent-shell-claude-agents-tracker--refresh-display)
-        (message "New message from teammate(s)")))))
+        (message "New message from teammate(s)")
+        ;; Check if ALL pending responses have been received
+        (when (and cleared-pending-response
+                   agent-shell-claude-agents-tracker--continuation-pending
+                   (zerop (hash-table-count agent-shell-claude-agents-tracker--waiting-for-response)))
+          (agent-shell-claude-agents-tracker--send-continuation team-name))))))
 
 ;;; Display / UI
 
@@ -1069,6 +1102,19 @@ Returns list of (team-name . inbox-file-path) pairs."
      (not (agent-shell-claude-agents-tracker--is-idle-notification-p msg)))
    messages))
 
+(defun agent-shell-claude-agents-tracker--send-continuation (team-name)
+  "Send continuation message to team-lead after all agents have responded.
+TEAM-NAME is the name of the team whose agents have all responded."
+  ;; Clear the continuation-pending flag first to prevent duplicate sends
+  (setq agent-shell-claude-agents-tracker--continuation-pending nil)
+  (let ((shell-buf (agent-shell-claude-agents-tracker--find-agent-shell-buffer)))
+    (when shell-buf
+      (with-current-buffer shell-buf
+        (agent-shell--send-command
+         :prompt (format "All teammates from team \"%s\" have responded to your messages. Check the Code Agents tracker (M-x agent-shell-claude-agents-tracker-show) to view their replies." team-name)
+         :shell-buffer shell-buf))
+      (message "All agents have responded - continuation sent to team-lead"))))
+
 
 (defun agent-shell-claude-agents-tracker--agent-has-unread-p (agent-name)
   "Return non-nil if AGENT-NAME has unread messages."
@@ -1094,6 +1140,8 @@ Returns list of (team-name . inbox-file-path) pairs."
   (when (yes-or-no-p "Clear all messages and reset tracking? ")
     (clrhash agent-shell-claude-agents-tracker--seen-messages)
     (clrhash agent-shell-claude-agents-tracker--agent-messages)
+    (clrhash agent-shell-claude-agents-tracker--waiting-for-response)
+    (setq agent-shell-claude-agents-tracker--continuation-pending nil)
     (agent-shell-claude-agents-tracker--refresh-display)
     (message "Messages cleared")))
 
@@ -1349,6 +1397,7 @@ WARNING: This is destructive and cannot be undone!"
         (clrhash agent-shell-claude-agents-tracker--expanded-messages)
         (clrhash agent-shell-claude-agents-tracker--collapsed-messages)
         (clrhash agent-shell-claude-agents-tracker--waiting-for-response)
+        (setq agent-shell-claude-agents-tracker--continuation-pending nil)
         ;; Unsubscribe from all buffers
         (dolist (entry agent-shell-claude-agents-tracker--subscriptions)
           (agent-shell-claude-agents-tracker--unsubscribe-from-buffer (car entry)))
@@ -1441,8 +1490,9 @@ Sends the message request directly to the parent agent-shell session."
         (if shell-buf
             (let ((input (format "Send message to teammate \"%s\": %s"
                                  teammate-name msg-text)))
-              ;; Set waiting state
+              ;; Set waiting state and enable continuation tracking
               (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
+              (setq agent-shell-claude-agents-tracker--continuation-pending t)
               ;; Call from within the buffer context so it can access session state
               (with-current-buffer shell-buf
                 (agent-shell--send-command :prompt input :shell-buffer shell-buf))
@@ -1487,8 +1537,9 @@ Prompts for team name, then teammate, then message content."
               (if shell-buf
                   (let ((input (format "Send message to teammate \"%s\": %s"
                                        teammate-name msg-text)))
-                    ;; Set waiting state
+                    ;; Set waiting state and enable continuation tracking
                     (puthash teammate-name (current-time) agent-shell-claude-agents-tracker--waiting-for-response)
+                    (setq agent-shell-claude-agents-tracker--continuation-pending t)
                     ;; Call from within the buffer context so it can access session state
                     (with-current-buffer shell-buf
                       (agent-shell--send-command :prompt input :shell-buffer shell-buf))
