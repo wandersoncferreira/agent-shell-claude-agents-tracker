@@ -99,7 +99,31 @@ You can also click on =▶ Show details= buttons to expand/collapse, or =✉ Sen
 
 ;; Maximum lines of prompt/output to show when expanded (default: 10)
 (setq agent-shell-claude-agents-tracker-output-max-lines 10)
+
+;; Drop stale notifications from ACP server (default: t)
+;; Set to nil if you want to see all notifications
+(setq agent-shell-claude-agents-tracker-drop-stale-notifications t)
 #+end_src
+
+* Stale Notification Fix
+
+When you interact with Claude Code agents directly (e.g., via the terminal or another
+interface), stale notification messages may leak into the agent-shell buffer when you
+return to Emacs.  This happens because the ACP server sends notifications that agent-shell
+processes even when there are no active requests.
+
+This package includes a fix that is *enabled by default*.  It advises
+=agent-shell--active-requests-p= to properly check if there are active requests before
+processing notifications.  When no active requests exist, stale notifications are
+silently dropped.
+
+To disable this behavior:
+
+#+begin_src emacs-lisp
+(setq agent-shell-claude-agents-tracker-drop-stale-notifications nil)
+#+end_src
+
+See [[https://github.com/xenodium/agent-shell/pull/346]] for context on this issue.
 
 * Limitations
 
